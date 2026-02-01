@@ -11,7 +11,4 @@ app.get("*", (_req, res) => {
   res.sendFile(path.join(distPath, "index.html"));
 });
 
-app.listen(port, () => {
-  // eslint-disable-next-line no-console
-  console.log(`Serving dist on port ${port}`);
-});
+app.listen(port, "0.0.0.0", () => console.log("listening", port));
