@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Phone,
   Clock,
@@ -63,13 +63,36 @@ import {
  * - To Do: calls requiring action + booking workflow
  * - Insights: weekly volume, avg call length, outcomes
  *
- * Uses mock data + local state.
+ * Uses API data + local state.
  */
 
 const formatSecs = (s: number) => {
   const m = Math.floor(s / 60);
   const r = s % 60;
   return `${m}:${String(r).padStart(2, "0")}`;
+};
+
+const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || "http://localhost:8080";
+
+const formatWhen = (iso: string) => {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startOfYesterday = new Date(startOfToday);
+  startOfYesterday.setDate(startOfYesterday.getDate() - 1);
+
+  const time = d.toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+  if (d >= startOfToday) return `Today ${time}`;
+  if (d >= startOfYesterday) return `Yesterday ${time}`;
+
+  const weekday = d.toLocaleDateString(undefined, { weekday: "short" });
+  return `${weekday} ${time}`;
 };
 
 // Tiny “test cases” (runs in dev; harmless in prod)
@@ -112,6 +135,22 @@ type CallRecord = {
   rateEUR?: number; // show for booked calls
 };
 
+type ApiCall = {
+  id: string;
+  externalId: string;
+  startedAt: string;
+  fromNumber: string;
+  durationSec: number;
+  language: CallRecord["language"];
+  outcome: CallOutcome;
+  priority: CallRecord["priority"];
+  summary: string;
+  transcriptPreview: string | null;
+  requiresAction: boolean;
+  tag: string | null;
+  rateEur: number | string | null;
+};
+
 const outcomeBadge = (outcome: CallOutcome) => {
   const map: Record<
     CallOutcome,
@@ -132,116 +171,6 @@ const priorityPill = (p: CallRecord["priority"]) => {
   if (p === "Medium") return <Badge variant="secondary">Medium</Badge>;
   return <Badge variant="outline">Low</Badge>;
 };
-
-const mockCalls: CallRecord[] = [
-  {
-    id: "CA_001",
-    when: "Today 09:12",
-    iso: "2026-01-28T09:12:00",
-    from: "+30 694 123 4567",
-    durationSec: 318,
-    language: "Greek",
-    outcome: "Needs follow-up",
-    priority: "High",
-    summary:
-      "Couple requesting Double room, Feb 3–6. Asked about parking + late check-in. Wants email confirmation.",
-    transcriptPreview:
-      "...θέλουμε ένα δίκλινο από 3 έως 6 Φεβρουαρίου... υπάρχει πάρκινγκ;...",
-    extracted: {
-      guestName: "(unknown)",
-      checkIn: "2026-02-03",
-      checkOut: "2026-02-06",
-      adults: 2,
-      children: 0,
-      roomType: "Double",
-      rateType: "Standard",
-      status: "Draft",
-      notes: "Asked about parking + late check-in. Send confirmation email.",
-    },
-    requiresAction: true,
-  },
-  {
-    id: "CA_002",
-    when: "Today 08:04",
-    iso: "2026-01-28T08:04:00",
-    from: "+44 7700 900 123",
-    durationSec: 142,
-    language: "English",
-    outcome: "Inquiry",
-    priority: "Medium",
-    summary: "Asked about restaurant hours and whether vegetarian options are available.",
-    transcriptPreview: "...what time does the restaurant open... vegetarian options...",
-    requiresAction: false,
-  },
-  {
-    id: "CA_003",
-    when: "Yesterday 19:31",
-    iso: "2026-01-27T19:31:00",
-    from: "+30 210 555 0101",
-    durationSec: 401,
-    language: "Greek",
-    outcome: "Booked",
-    priority: "Low",
-    rateEUR: 180,
-    summary: "Confirmed Triple room, Jan 30–Feb 1. €180/night. Payment on arrival.",
-    transcriptPreview:
-      "...κλείνουμε τρίκλινο... από 30 Ιανουαρίου μέχρι 1 Φεβρουαρίου...",
-    requiresAction: false,
-  },
-  {
-    id: "CA_004",
-    when: "Yesterday 14:09",
-    iso: "2026-01-27T14:09:00",
-    from: "+1 424 245 5769",
-    durationSec: 56,
-    language: "English",
-    outcome: "No answer",
-    priority: "Low",
-    summary: "Missed call. No voicemail.",
-    transcriptPreview: "(no transcript)",
-    requiresAction: true,
-  },
-  {
-    id: "CA_005",
-    when: "Mon 12:22",
-    iso: "2026-01-26T12:22:00",
-    from: "+30 697 222 9911",
-    durationSec: 233,
-    language: "Greek",
-    outcome: "Inquiry",
-    priority: "Medium",
-    summary:
-      "Family asking for Suite availability Mar 10–14. Wants price and breakfast details.",
-    transcriptPreview: "...σουίτα... 10 έως 14 Μαρτίου... τιμή με πρωινό;...",
-    requiresAction: false,
-  },
-  {
-    id: "CA_006",
-    tag: "Wedding",
-    when: "Sun 10:55",
-    iso: "2026-01-25T10:55:00",
-    from: "+49 1512 3456789",
-    durationSec: 188,
-    language: "English",
-    outcome: "Booked",
-    priority: "Low",
-    rateEUR: 220,
-    summary:
-      "Booked Double room, Feb 14–16. €220/night. Confirmed breakfast included.",
-    transcriptPreview: "...we'd like to book a double from Feb 14 to Feb 16...",
-    requiresAction: false,
-  },
-];
-
-// More tiny “test cases”
-console.assert(
-  mockCalls.filter((c) => c.requiresAction).length === 2,
-  "Expected exactly 2 calls to require action"
-);
-console.assert(
-  mockCalls.filter((c) => c.tag === "Wedding").length === 1,
-  "Expected exactly 1 call tagged Wedding"
-);
 
 const weekSeries = [
   { day: "Mon", calls: 5, avgSec: 210 },
@@ -539,9 +468,64 @@ function BookingWorkflow({
 }
 
 export default function App() {
-  const [calls, setCalls] = useState<CallRecord[]>(mockCalls);
-  const [selected, setSelected] = useState<CallRecord | null>(mockCalls[0]);
+  const [calls, setCalls] = useState<CallRecord[]>([]);
+  const [selected, setSelected] = useState<CallRecord | null>(null);
   const [query, setQuery] = useState<string>("");
+
+  useEffect(() => {
+    let cancelled = false;
+    const controller = new AbortController();
+
+    const mapApiCall = (row: ApiCall): CallRecord => {
+      const rate = row.rateEur !== null ? Number(row.rateEur) : undefined;
+      const iso = row.startedAt;
+      return {
+        id: row.externalId,
+        when: formatWhen(iso),
+        iso,
+        from: row.fromNumber,
+        durationSec: row.durationSec,
+        language: row.language,
+        outcome: row.outcome,
+        priority: row.priority,
+        summary: row.summary,
+        transcriptPreview: row.transcriptPreview ?? "(no transcript)",
+        requiresAction: row.requiresAction,
+        tag: row.tag ?? undefined,
+        rateEUR: Number.isFinite(rate) ? rate : undefined,
+      };
+    };
+
+    const loadCalls = async () => {
+      try {
+        const res = await fetch(`${apiBaseUrl}/calls?limit=6`, {
+          signal: controller.signal,
+        });
+        if (!res.ok) throw new Error(`Failed to load calls: ${res.status}`);
+        const data = (await res.json()) as ApiCall[];
+        if (!Array.isArray(data)) throw new Error("Invalid calls payload");
+
+        const mapped = data.map(mapApiCall);
+
+        if (!cancelled) {
+          setCalls(mapped);
+          setSelected(mapped[0] ?? null);
+        }
+      } catch {
+        if (!cancelled) {
+          setCalls([]);
+          setSelected(null);
+        }
+      }
+    };
+
+    loadCalls();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, []);
 
   const filtered = useMemo(() => {
     if (!query.trim()) return calls;
@@ -691,6 +675,24 @@ export default function App() {
           </div>
         </div>
 
+        {calls.length === 0 && (
+          <Card className="rounded-2xl border-dashed">
+            <CardContent className="p-6">
+              <div className="flex items-center gap-3">
+                <div className="h-10 w-10 rounded-2xl border bg-background flex items-center justify-center">
+                  <Sparkles className="h-5 w-5 text-purple-500" />
+                </div>
+                <div>
+                  <div className="text-sm font-medium">No calls captured yet</div>
+                  <div className="text-xs text-muted-foreground">
+                    When calls arrive, they will show up here automatically.
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
         {/* Stats */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
           <Stat label="Calls this week" value={`${callsThisWeek}`} icon={Phone} />
@@ -734,13 +736,19 @@ export default function App() {
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
               <Card className="rounded-2xl shadow-sm lg:col-span-2">
                 <CardHeader className="pb-2">
-                  <CardTitle className="text-lg">Last 6 calls</CardTitle>
+                  <CardTitle className="text-lg">
+                    Last calls ({last6.length})
+                  </CardTitle>
                   <CardDescription>Click a call to view details.</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3">
-                  {last6.map((c) => (
-                    <CallRow key={c.id} call={c} onSelect={setSelected} />
-                  ))}
+                  {last6.length === 0 ? (
+                    <div className="text-sm text-muted-foreground">
+                      No calls captured yet.
+                    </div>
+                  ) : (
+                    last6.map((c) => <CallRow key={c.id} call={c} onSelect={setSelected} />)
+                  )}
                 </CardContent>
               </Card>
 

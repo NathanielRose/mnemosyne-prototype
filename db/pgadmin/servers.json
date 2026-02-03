@@ -1,0 +1,13 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "mnemosyne",
+      "Group": "Servers",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "mnemosyne",
+      "Username": "mnemo",
+      "SSLMode": "prefer"
+    }
+  }
+}

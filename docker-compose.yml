@@ -1,0 +1,77 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: mnemosyne
+      POSTGRES_USER: mnemo
+      POSTGRES_PASSWORD: mnemo
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mnemo -d mnemosyne"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  db-migrate:
+    build: ./db
+    environment:
+      DATABASE_URL: postgres://mnemo:mnemo@postgres:5432/mnemosyne
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: npm run migrate
+
+  db-seed:
+    build: ./db
+    environment:
+      DATABASE_URL: postgres://mnemo:mnemo@postgres:5432/mnemosyne
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+    command: npm run seed
+
+  api:
+    build: ./apps/api
+    environment:
+      DATABASE_URL: postgres://mnemo:mnemo@postgres:5432/mnemosyne
+      PORT: 8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./apps/web
+      args:
+        VITE_API_BASE_URL: http://localhost:8080
+    environment:
+      PORT: 3000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+  pgadmin:
+    image: dpage/pgadmin4:9.11
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@local.dev
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_LISTEN_PORT: 5050
+      PGADMIN_CONFIG_SERVER_MODE: "True"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+    ports:
+      - "5050:5050"
+    volumes:
+      - ./db/pgadmin/servers.json:/pgadmin4/servers.json:ro
+      - ./db/pgadmin/pgpass:/pgadmin4/pgpass:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
