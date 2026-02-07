@@ -1,4 +1,9 @@
 services:
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
   postgres:
     image: postgres:16-alpine
     environment:
@@ -38,11 +43,24 @@ services:
     environment:
       DATABASE_URL: postgres://mnemo:mnemo@postgres:5432/mnemosyne
       PORT: 8080
+      REDIS_URL: redis://redis:6379
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      PUBLIC_WEBHOOK_URL: ${PUBLIC_WEBHOOK_URL:-}
     ports:
       - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_started
+
+  worker:
+    build: ./worker
+    environment:
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_started
 
   web:
     build:
