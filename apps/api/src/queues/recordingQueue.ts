@@ -3,15 +3,22 @@ import { Redis } from "ioredis";
 
 export const RECORDING_QUEUE_NAME = "recording_jobs";
 
-const redisUrl = process.env.REDIS_URL;
-if (!redisUrl) {
-  throw new Error("REDIS_URL is required for BullMQ producer.");
+let recordingQueue: Queue | null = null;
+
+function getRecordingQueue(): Queue | null {
+  if (!recordingQueue) {
+    const redisUrl = process.env.REDIS_URL;
+    if (!redisUrl) {
+      return null;
+    }
+
+    // BullMQ recommends ioredis with maxRetriesPerRequest=null
+    const connection = new Redis(redisUrl, { maxRetriesPerRequest: null });
+    recordingQueue = new Queue(RECORDING_QUEUE_NAME, { connection });
+  }
+
+  return recordingQueue;
 }
-
-// BullMQ recommends ioredis with maxRetriesPerRequest=null
-const connection = new Redis(redisUrl, { maxRetriesPerRequest: null });
-
-export const recordingQueue = new Queue(RECORDING_QUEUE_NAME, { connection });
 
 export type RecordingJobPayload = {
   accountSid: string;
@@ -23,9 +30,18 @@ export type RecordingJobPayload = {
   publicWebhookUrl: string;
 };
 
+export type EnqueueRecordingJobResult =
+  | { ok: true; jobId: string; duplicated?: true }
+  | { ok: false; error: "REDIS_URL_NOT_CONFIGURED" };
+
 export async function enqueueRecordingJob(payload: RecordingJobPayload) {
+  const queue = getRecordingQueue();
+  if (!queue) {
+    return { ok: false as const, error: "REDIS_URL_NOT_CONFIGURED" as const };
+  }
+
   try {
-    const job = await recordingQueue.add("twilio_recording_completed", payload, {
+    const job = await queue.add("twilio_recording_completed", payload, {
       jobId: payload.recordingSid,
       attempts: 5,
       backoff: { type: "exponential", delay: 2_000 },

@@ -18,27 +18,6 @@ const app = Fastify({
   logger: true,
 });
 
-// #region agent log
-fetch("http://127.0.0.1:7242/ingest/a3ef73b0-1718-4862-bfcc-8be547c0ddca", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({
-    location: "apps/api/src/index.ts:22",
-    message: "api starting",
-    data: {
-      hasDatabaseUrl: Boolean(process.env.DATABASE_URL),
-      hasRedisUrl: Boolean(process.env.REDIS_URL),
-      hasTwilioAuthToken: Boolean(process.env.TWILIO_AUTH_TOKEN),
-      hasPublicWebhookUrl: Boolean(process.env.PUBLIC_WEBHOOK_URL),
-      port: process.env.PORT ? "set" : "unset",
-    },
-    timestamp: Date.now(),
-    runId: "pre-fix",
-    hypothesisId: "H1",
-  }),
-}).catch(() => {});
-// #endregion
-
 await app.register(cors, {
   origin: true,
 });
@@ -128,8 +107,16 @@ app.post(
         publicWebhookUrl: webhookUrl,
       });
 
+      if (!result.ok) {
+        request.log.warn(
+          { recordingSid, redisConfigured: false },
+          "Redis not configured; skipping enqueue"
+        );
+        return reply.code(503).send({ ok: false, error: "REDIS_URL_NOT_CONFIGURED" });
+      }
+
       request.log.info(
-        { jobId: result.jobId, duplicated: (result as any).duplicated ?? false },
+        { jobId: result.jobId, duplicated: result.duplicated ?? false },
         "Recording job enqueued"
       );
 
