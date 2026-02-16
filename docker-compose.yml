@@ -44,8 +44,11 @@ services:
       DATABASE_URL: postgres://mnemo:mnemo@postgres:5432/mnemosyne
       PORT: 8080
       REDIS_URL: redis://redis:6379
-      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
-      PUBLIC_WEBHOOK_URL: ${PUBLIC_WEBHOOK_URL:-}
+      BULLBOARD_ENABLED: "true"
+      # Defaults make local webhook testing work out-of-the-box.
+      # Override with real values via your shell env or a `.env` file.
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-test_auth_token}
+      PUBLIC_WEBHOOK_URL: ${PUBLIC_WEBHOOK_URL:-http://localhost:8080}
     ports:
       - "8080:8080"
     depends_on:

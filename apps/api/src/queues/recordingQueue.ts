@@ -5,7 +5,7 @@ export const RECORDING_QUEUE_NAME = "recording_jobs";
 
 let recordingQueue: Queue | null = null;
 
-function getRecordingQueue(): Queue | null {
+export function getRecordingQueue(): Queue | null {
   if (!recordingQueue) {
     const redisUrl = process.env.REDIS_URL;
     if (!redisUrl) {
@@ -45,7 +45,8 @@ export async function enqueueRecordingJob(payload: RecordingJobPayload) {
       jobId: payload.recordingSid,
       attempts: 5,
       backoff: { type: "exponential", delay: 2_000 },
-      removeOnComplete: true,
+      // Keep the most recent completed jobs visible in Bull Board.
+      removeOnComplete: 25,
       removeOnFail: 100,
     });
 

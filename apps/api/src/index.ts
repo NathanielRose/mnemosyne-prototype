@@ -3,10 +3,14 @@ import cors from "@fastify/cors";
 import formbody from "@fastify/formbody";
 import rawBody from "fastify-raw-body";
 import { desc } from "drizzle-orm";
+import { createBullBoard } from "@bull-board/api";
+import { BullMQAdapter } from "@bull-board/api/bullMQAdapter";
+import { ExpressAdapter } from "@bull-board/express";
+import fastifyExpress from "@fastify/express";
 import twilio from "twilio";
 import { getDb } from "./db.js";
 import { calls } from "./schema.js";
-import { enqueueRecordingJob } from "./queues/recordingQueue.js";
+import { enqueueRecordingJob, getRecordingQueue } from "./queues/recordingQueue.js";
 
 const TWILIO_RECORDING_PATH = "/webhooks/twilio/recording";
 
@@ -36,6 +40,38 @@ await app.register(formbody);
 app.get("/health", async () => {
   return { ok: true };
 });
+
+// Bull Board (queue UI) - enable explicitly for local testing.
+if (process.env.BULLBOARD_ENABLED === "true") {
+  await app.register(fastifyExpress);
+
+  const recordingQueue = getRecordingQueue();
+  if (!recordingQueue) {
+    app.log.warn("Bull Board enabled but REDIS_URL is not configured; skipping UI mount");
+  } else {
+    const basePath = "/admin/queues";
+    const serverAdapter = new ExpressAdapter();
+    serverAdapter.setBasePath(basePath);
+
+    createBullBoard({
+      queues: [new BullMQAdapter(recordingQueue)],
+      serverAdapter,
+    });
+
+    // Some Fastify+Express setups will default string responses to `text/plain`,
+    // which makes the browser show the HTML source instead of rendering the UI.
+    // Force `text/html` only for the entry document path.
+    app.use(basePath, (req: any, res: any, next: any) => {
+      if (req?.path === "/" || req?.path === "") {
+        res.type("html");
+      }
+      next();
+    });
+
+    app.use(basePath, serverAdapter.getRouter());
+    app.log.info({ basePath }, "Bull Board mounted");
+  }
+}
 
 app.post(
   TWILIO_RECORDING_PATH,
