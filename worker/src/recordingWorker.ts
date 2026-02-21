@@ -22,14 +22,21 @@ const connection = {
 const worker = new Worker(
   "recording_jobs",
   async (job) => {
+    const { recordingUrl, recordingSid, callSid } = job.data;
     console.log("[worker] job received", {
       id: job.id,
       name: job.name,
       attemptsMade: job.attemptsMade,
-      data: job.data,
+      recordingSid,
+      callSid,
+      recordingUrl,
     });
 
-    // Phase 1: do nothing except log
+    // Phase 1: log payload; recordingUrl available for downstream processing
+    if (recordingUrl) {
+      console.log("[worker] recording URL:", recordingUrl);
+    }
+
     return { ok: true };
   },
   {

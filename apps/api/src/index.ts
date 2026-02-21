@@ -102,6 +102,7 @@ app.post(
     const callSid = body.CallSid;
     const recordingSid = body.RecordingSid;
     const recordingStatus = body.RecordingStatus;
+    const recordingUrl = typeof body.RecordingUrl === "string" ? body.RecordingUrl : undefined;
 
     if (
       typeof accountSid !== "string" ||
@@ -141,6 +142,7 @@ app.post(
         receivedAt: new Date().toISOString(),
         rawBody: raw,
         publicWebhookUrl: webhookUrl,
+        recordingUrl,
       });
 
       if (!result.ok) {
