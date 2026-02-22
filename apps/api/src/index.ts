@@ -2,14 +2,14 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import formbody from "@fastify/formbody";
 import rawBody from "fastify-raw-body";
-import { desc } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { createBullBoard } from "@bull-board/api";
 import { BullMQAdapter } from "@bull-board/api/bullMQAdapter";
 import { ExpressAdapter } from "@bull-board/express";
 import fastifyExpress from "@fastify/express";
 import twilio from "twilio";
 import { getDb } from "./db.js";
-import { calls } from "./schema.js";
+import { calls, transcripts } from "./schema.js";
 import { enqueueRecordingJob, getRecordingQueue } from "./queues/recordingQueue.js";
 
 const TWILIO_RECORDING_PATH = "/webhooks/twilio/recording";
@@ -103,6 +103,10 @@ app.post(
     const recordingSid = body.RecordingSid;
     const recordingStatus = body.RecordingStatus;
     const recordingUrl = typeof body.RecordingUrl === "string" ? body.RecordingUrl : undefined;
+    const recordingDurationRaw = body.RecordingDuration;
+    const fromRaw = body.From ?? body.Caller;
+    const toRaw = body.To ?? body.Called;
+    const directionRaw = body.Direction;
 
     if (
       typeof accountSid !== "string" ||
@@ -112,6 +116,16 @@ app.post(
     ) {
       return reply.code(400).send({ ok: false });
     }
+
+    const durationSec =
+      typeof recordingDurationRaw === "string" || typeof recordingDurationRaw === "number"
+        ? Number(recordingDurationRaw)
+        : undefined;
+    const safeDurationSec = Number.isFinite(durationSec) ? Math.max(0, Math.floor(durationSec!)) : undefined;
+
+    const fromNumber = typeof fromRaw === "string" && fromRaw.trim().length ? fromRaw.trim() : undefined;
+    const toNumber = typeof toRaw === "string" && toRaw.trim().length ? toRaw.trim() : undefined;
+    const direction = typeof directionRaw === "string" && directionRaw.trim().length ? directionRaw.trim() : undefined;
 
     const webhookUrl = joinPublicUrl(publicBase, TWILIO_RECORDING_PATH);
 
@@ -143,6 +157,10 @@ app.post(
         rawBody: raw,
         publicWebhookUrl: webhookUrl,
         recordingUrl,
+        durationSec: safeDurationSec,
+        fromNumber,
+        toNumber,
+        direction,
       });
 
       if (!result.ok) {
@@ -167,19 +185,44 @@ app.post(
 );
 
 app.get("/calls", async (request, reply) => {
-  const { limit } = request.query as { limit?: string };
-  const parsed = Number(limit);
-  const safeLimit = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 50) : 6;
+  const { limit, offset } = request.query as { limit?: string; offset?: string };
+  const parsedLimit = Number(limit);
+  const safeLimit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 50) : 6;
+  const parsedOffset = Number(offset);
+  const safeOffset = Number.isFinite(parsedOffset) ? Math.max(parsedOffset, 0) : 0;
 
   try {
     const { db } = getDb();
     const rows = await db
-      .select()
+      .select({
+        call: calls,
+        transcriptOriginal: transcripts.content,
+        transcriptEnglish: transcripts.contentEn,
+      })
       .from(calls)
+      .leftJoin(transcripts, eq(transcripts.callId, calls.id))
       .orderBy(desc(calls.startedAt))
-      .limit(safeLimit);
+      .limit(safeLimit)
+      .offset(safeOffset);
 
-    reply.send(rows);
+    const shaped = rows.map((r) => {
+      const transcriptPreviewOriginal =
+        typeof r.transcriptOriginal === "string" && r.transcriptOriginal.trim().length
+          ? r.transcriptOriginal.trim().slice(0, 280)
+          : null;
+      const transcriptPreviewEn =
+        typeof r.transcriptEnglish === "string" && r.transcriptEnglish.trim().length
+          ? r.transcriptEnglish.trim().slice(0, 280)
+          : null;
+
+      return {
+        ...r.call,
+        transcriptPreviewOriginal,
+        transcriptPreviewEn,
+      };
+    });
+
+    reply.send(shaped);
   } catch (err: any) {
     request.log.error({ err }, "Database not configured for /calls");
     reply.code(503).send({ ok: false, error: "DATABASE_URL not configured" });

@@ -30,6 +30,9 @@ Thumbs.db
 logs/
 *.log
 
+# Worker recordings (downloaded media)
+worker/recordings/
+
 # Temporary files
 tmp/
 temp/

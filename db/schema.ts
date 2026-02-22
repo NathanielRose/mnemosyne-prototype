@@ -48,8 +48,10 @@ export const calls = pgTable(
     externalId: text("external_id").notNull(),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
     fromNumber: text("from_number").notNull(),
+    toNumber: text("to_number"),
     durationSec: integer("duration_sec").notNull(),
     language: callLanguage("language").notNull(),
+    detectedLanguage: text("detected_language"),
     outcome: callOutcome("outcome").notNull(),
     priority: callPriority("priority").notNull(),
     summary: text("summary").notNull(),
@@ -57,6 +59,8 @@ export const calls = pgTable(
     requiresAction: boolean("requires_action").notNull().default(false),
     tag: text("tag"),
     rateEur: numeric("rate_eur", { precision: 10, scale: 2 }),
+    status: text("status").notNull().default("completed"),
+    error: text("error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -77,6 +81,8 @@ export const recordings = pgTable(
     durationSec: integer("duration_sec"),
     status: recordingStatus("status").notNull().default("pending"),
     url: text("url"),
+    localPath: text("local_path"),
+    downloadedAt: timestamp("downloaded_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -98,11 +104,69 @@ export const transcripts = pgTable(
       onDelete: "set null",
     }),
     language: callLanguage("language").notNull(),
+    detectedLanguage: text("detected_language"),
     content: text("content").notNull(),
+    contentEn: text("content_en"),
+    rawJson: jsonb("raw_json"),
+    rawJsonEn: jsonb("raw_json_en"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
     callIdUnique: uniqueIndex("transcripts_call_id_unique").on(table.callId),
+    recordingIdUnique: uniqueIndex("transcripts_recording_id_unique").on(table.recordingId),
+  })
+);
+
+export const insights = pgTable(
+  "insights",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    recordingId: uuid("recording_id")
+      .notNull()
+      .references(() => recordings.id, { onDelete: "cascade" }),
+    data: jsonb("data").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    recordingIdUnique: uniqueIndex("insights_recording_id_unique").on(table.recordingId),
+  })
+);
+
+export const pipelineRuns = pgTable(
+  "pipeline_runs",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    recordingSid: text("recording_sid").notNull(),
+    jobId: text("job_id"),
+    status: text("status").notNull().default("started"),
+    attempt: integer("attempt").notNull().default(1),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (table) => ({
+    recordingJobUnique: uniqueIndex("pipeline_runs_recording_job_unique").on(
+      table.recordingSid,
+      table.jobId
+    ),
+  })
+);
+
+export const pipelineSteps = pgTable(
+  "pipeline_steps",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => pipelineRuns.id, { onDelete: "cascade" }),
+    step: text("step").notNull(),
+    status: text("status").notNull().default("started"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    meta: jsonb("meta"),
+    error: text("error"),
+  },
+  (table) => ({
+    runStepUnique: uniqueIndex("pipeline_steps_run_step_unique").on(table.runId, table.step),
   })
 );
 

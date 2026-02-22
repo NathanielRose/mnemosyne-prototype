@@ -6,14 +6,19 @@
   "scripts": {
     "dev": "tsx watch src/recordingWorker.ts",
     "build": "tsc",
-    "start": "node dist/recordingWorker.js"
+    "start": "node dist/recordingWorker.js",
+    "enqueue:test": "node scripts/enqueue-test-job.mjs"
   },
   "dependencies": {
     "bullmq": "^5.25.0",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "drizzle-orm": "^0.45.1",
+    "openai": "^6.22.0",
+    "pg": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",
+    "@types/pg": "^8.16.0",
     "tsx": "^4.19.2",
     "typescript": "^5.6.2"
   }

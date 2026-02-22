@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { Worker } from "bullmq";
+import { runPipeline } from "./pipeline/index.js";
 
 const redisUrl = process.env.REDIS_URL;
 if (!redisUrl) {
@@ -22,7 +23,7 @@ const connection = {
 const worker = new Worker(
   "recording_jobs",
   async (job) => {
-    const { recordingUrl, recordingSid, callSid } = job.data;
+    const { recordingUrl, recordingSid, callSid } = job.data as any;
     console.log("[worker] job received", {
       id: job.id,
       name: job.name,
@@ -32,12 +33,7 @@ const worker = new Worker(
       recordingUrl,
     });
 
-    // Phase 1: log payload; recordingUrl available for downstream processing
-    if (recordingUrl) {
-      console.log("[worker] recording URL:", recordingUrl);
-    }
-
-    return { ok: true };
+    return await runPipeline(job);
   },
   {
     connection,
