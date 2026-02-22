@@ -61,9 +61,19 @@ services:
     build: ./worker
     environment:
       REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgres://mnemo:mnemo@postgres:5432/mnemosyne
+      # Used to download Twilio recording media (HTTP Basic Auth).
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-test_auth_token}
+      # Used for Whisper transcription.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     depends_on:
       redis:
         condition: service_started
+      postgres:
+        condition: service_healthy
+    volumes:
+      - worker_recordings:/app/recordings
 
   web:
     build:
@@ -96,3 +106,4 @@ services:
 
 volumes:
   postgres_data:
+  worker_recordings:

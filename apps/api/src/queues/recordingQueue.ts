@@ -29,6 +29,10 @@ export type RecordingJobPayload = {
   rawBody?: string;
   publicWebhookUrl: string;
   recordingUrl?: string;
+  durationSec?: number;
+  fromNumber?: string;
+  toNumber?: string;
+  direction?: string;
 };
 
 export type EnqueueRecordingJobResult =

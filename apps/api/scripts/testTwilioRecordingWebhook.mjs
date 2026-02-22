@@ -59,6 +59,13 @@ async function main() {
     CallSid: args["call-sid"] ?? "CA456",
     RecordingSid: args["recording-sid"] ?? randomId("RE"),
     RecordingStatus: args["recording-status"] ?? "completed",
+    RecordingUrl:
+      args["recording-url"] ??
+      "https://api.twilio.com/2010-04-01/Accounts/AC123/Recordings/RE123",
+    RecordingDuration: args["recording-duration"] ?? "45",
+    From: args["from"] ?? "+15551234567",
+    To: args["to"] ?? "+15557654321",
+    Direction: args["direction"] ?? "inbound",
   };
 
   const signature = computeTwilioSignature({ authToken, webhookUrl, params });

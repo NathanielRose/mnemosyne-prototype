@@ -10,6 +10,8 @@ import {
   Search,
   Download,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   Bell,
   X,
 } from "lucide-react";
@@ -73,6 +75,7 @@ const formatSecs = (s: number) => {
 };
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || "http://localhost:8080";
+const PAGE_SIZE = 6;
 
 const formatWhen = (iso: string) => {
   const d = new Date(iso);
@@ -121,8 +124,12 @@ type CallRecord = {
   when: string; // e.g., "Today 09:12"
   iso: string; // e.g., "2026-01-28T09:12:00"
   from: string;
+  to?: string;
   durationSec: number;
   language: "Greek" | "English";
+  detectedLanguage?: string;
+  transcriptPreviewOriginal?: string;
+  transcriptPreviewEn?: string;
   outcome: CallOutcome;
   priority: "Low" | "Medium" | "High";
   summary: string;
@@ -140,8 +147,12 @@ type ApiCall = {
   externalId: string;
   startedAt: string;
   fromNumber: string;
+  toNumber?: string | null;
   durationSec: number;
   language: CallRecord["language"];
+  detectedLanguage?: string | null;
+  transcriptPreviewOriginal?: string | null;
+  transcriptPreviewEn?: string | null;
   outcome: CallOutcome;
   priority: CallRecord["priority"];
   summary: string;
@@ -218,9 +229,11 @@ function Stat({
 function CallRow({
   call,
   onSelect,
+  isSelected,
 }: {
   call: CallRecord;
   onSelect: (c: CallRecord) => void;
+  isSelected?: boolean;
 }) {
   return (
     <button
@@ -228,14 +241,20 @@ function CallRow({
       onClick={() => onSelect(call)}
       aria-label={`Open call ${call.id}`}
     >
-      <Card className="rounded-2xl shadow-sm hover:shadow transition">
+      <Card
+        className={
+          isSelected
+            ? "rounded-2xl bg-purple-50 shadow hover:shadow-md transition border-purple-200"
+            : "rounded-2xl bg-muted/25 shadow hover:shadow-md transition border-muted/60"
+        }
+      >
         <CardContent className="p-4">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
                 <div className="font-semibold">{call.when}</div>
                 <Badge variant="outline" className="rounded-xl">
-                  {call.language}
+                  {call.detectedLanguage ? call.detectedLanguage : call.language}
                 </Badge>
                 {outcomeBadge(call.outcome)}
                 {call.tag ? (
@@ -254,8 +273,8 @@ function CallRow({
                 )}
               </div>
 
-              <div className="mt-2 text-sm text-muted-foreground truncate">
-                From: {call.from}
+              <div className="mt-2 text-sm text-muted-foreground truncate flex items-center gap-1">
+                <Phone className="h-4 w-4 shrink-0" /> From: {call.from}
               </div>
 
               <div className="mt-2 text-sm leading-5 line-clamp-2">{call.summary}</div>
@@ -271,8 +290,8 @@ function CallRow({
               <div className="flex items-center gap-1 text-sm text-muted-foreground">
                 <Clock className="h-4 w-4" /> {formatSecs(call.durationSec)}
               </div>
-              <div className="flex items-center gap-1 text-sm text-muted-foreground">
-                <Phone className="h-4 w-4" /> {call.id}
+              <div className="text-sm text-muted-foreground" title={call.id}>
+                SID:{call.id.slice(-6)}
               </div>
             </div>
           </div>
@@ -467,54 +486,65 @@ function BookingWorkflow({
   );
 }
 
+function mapApiCall(row: ApiCall): CallRecord {
+  const rate = row.rateEur !== null ? Number(row.rateEur) : undefined;
+  const iso = row.startedAt;
+  return {
+    id: row.externalId,
+    when: formatWhen(iso),
+    iso,
+    from: row.fromNumber,
+    to: row.toNumber ?? undefined,
+    durationSec: row.durationSec,
+    language: row.language,
+    detectedLanguage: row.detectedLanguage ?? undefined,
+    transcriptPreviewOriginal: row.transcriptPreviewOriginal ?? undefined,
+    transcriptPreviewEn: row.transcriptPreviewEn ?? undefined,
+    outcome: row.outcome,
+    priority: row.priority,
+    summary: row.summary,
+    transcriptPreview: row.transcriptPreview ?? "(no transcript)",
+    requiresAction: row.requiresAction,
+    tag: row.tag ?? undefined,
+    rateEUR: Number.isFinite(rate) ? rate : undefined,
+  };
+}
+
 export default function App() {
   const [calls, setCalls] = useState<CallRecord[]>([]);
   const [selected, setSelected] = useState<CallRecord | null>(null);
   const [query, setQuery] = useState<string>("");
+  const [transcriptExpanded, setTranscriptExpanded] = useState<boolean>(false);
+  const [transcriptVariant, setTranscriptVariant] = useState<"original" | "en">("en");
+  const [hasMoreCalls, setHasMoreCalls] = useState<boolean>(false);
+  const [loadingMoreCalls, setLoadingMoreCalls] = useState<boolean>(false);
 
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
 
-    const mapApiCall = (row: ApiCall): CallRecord => {
-      const rate = row.rateEur !== null ? Number(row.rateEur) : undefined;
-      const iso = row.startedAt;
-      return {
-        id: row.externalId,
-        when: formatWhen(iso),
-        iso,
-        from: row.fromNumber,
-        durationSec: row.durationSec,
-        language: row.language,
-        outcome: row.outcome,
-        priority: row.priority,
-        summary: row.summary,
-        transcriptPreview: row.transcriptPreview ?? "(no transcript)",
-        requiresAction: row.requiresAction,
-        tag: row.tag ?? undefined,
-        rateEUR: Number.isFinite(rate) ? rate : undefined,
-      };
-    };
-
     const loadCalls = async () => {
       try {
-        const res = await fetch(`${apiBaseUrl}/calls?limit=6`, {
+        const res = await fetch(`${apiBaseUrl}/calls?limit=${PAGE_SIZE + 1}&offset=0`, {
           signal: controller.signal,
         });
         if (!res.ok) throw new Error(`Failed to load calls: ${res.status}`);
         const data = (await res.json()) as ApiCall[];
         if (!Array.isArray(data)) throw new Error("Invalid calls payload");
 
-        const mapped = data.map(mapApiCall);
+        const hasMore = data.length > PAGE_SIZE;
+        const mapped = data.slice(0, PAGE_SIZE).map(mapApiCall);
 
         if (!cancelled) {
           setCalls(mapped);
           setSelected(mapped[0] ?? null);
+          setHasMoreCalls(hasMore);
         }
       } catch {
         if (!cancelled) {
           setCalls([]);
           setSelected(null);
+          setHasMoreCalls(false);
         }
       }
     };
@@ -526,6 +556,11 @@ export default function App() {
       controller.abort();
     };
   }, []);
+
+  useEffect(() => {
+    setTranscriptExpanded(false);
+    setTranscriptVariant(selected?.transcriptPreviewEn ? "en" : "original");
+  }, [selected?.id]);
 
   const filtered = useMemo(() => {
     if (!query.trim()) return calls;
@@ -539,7 +574,7 @@ export default function App() {
   }, [calls, query]);
 
   const last6 = useMemo(() => {
-    return [...calls].sort((a, b) => (a.iso < b.iso ? 1 : -1)).slice(0, 6);
+    return [...calls].sort((a, b) => (a.iso < b.iso ? 1 : -1));
   }, [calls]);
 
   const needsAction = useMemo(() => {
@@ -747,7 +782,51 @@ export default function App() {
                       No calls captured yet.
                     </div>
                   ) : (
-                    last6.map((c) => <CallRow key={c.id} call={c} onSelect={setSelected} />)
+                    <>
+                      {last6.map((c) => (
+                        <CallRow
+                          key={c.id}
+                          call={c}
+                          onSelect={setSelected}
+                          isSelected={selected?.id === c.id}
+                        />
+                      ))}
+
+                      {hasMoreCalls && (
+                        <div className="pt-1">
+                          <Button
+                            className="w-full rounded-2xl"
+                            variant="outline"
+                            disabled={loadingMoreCalls}
+                            onClick={async () => {
+                              if (loadingMoreCalls) return;
+                              setLoadingMoreCalls(true);
+                              try {
+                                const offset = calls.length;
+                                const res = await fetch(
+                                  `${apiBaseUrl}/calls?limit=${PAGE_SIZE + 1}&offset=${offset}`
+                                );
+                                if (!res.ok) throw new Error(`Failed to load more calls: ${res.status}`);
+                                const data = (await res.json()) as ApiCall[];
+                                if (!Array.isArray(data)) throw new Error("Invalid calls payload");
+
+                                const hasMore = data.length > PAGE_SIZE;
+                                const mapped = data.slice(0, PAGE_SIZE).map(mapApiCall);
+
+                                setCalls((prev) => [...prev, ...mapped]);
+                                setHasMoreCalls(hasMore);
+                              } catch {
+                                // keep existing list; just stop spinner
+                              } finally {
+                                setLoadingMoreCalls(false);
+                              }
+                            }}
+                          >
+                            {loadingMoreCalls ? "Loading…" : "Load more"}
+                          </Button>
+                        </div>
+                      )}
+                    </>
                   )}
                 </CardContent>
               </Card>
@@ -767,7 +846,10 @@ export default function App() {
                         {outcomeBadge(selected.outcome)}
                       </div>
 
-                      <div className="text-sm text-muted-foreground">From: {selected.from}</div>
+                      <div className="text-sm text-muted-foreground">
+                        Caller: {selected.from}
+                        {selected.to ? ` • Receiver: ${selected.to}` : ""}
+                      </div>
 
                       <div className="flex items-center justify-between text-sm">
                         <span className="text-muted-foreground">Duration</span>
@@ -784,9 +866,68 @@ export default function App() {
                       </div>
 
                       <div>
-                        <div className="text-sm font-medium">Transcript preview</div>
-                        <div className="mt-1 text-sm text-muted-foreground line-clamp-4">
-                          {selected.transcriptPreview}
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-sm font-medium">Transcript preview</div>
+                          <div className="flex items-center gap-2">
+                            <div className="inline-flex rounded-xl border bg-background/60 p-0.5">
+                              <button
+                                type="button"
+                                className={[
+                                  "px-2 py-1 text-xs rounded-lg transition",
+                                  transcriptVariant === "original"
+                                    ? "bg-purple-600 text-white"
+                                    : "text-muted-foreground hover:text-foreground",
+                                ].join(" ")}
+                                onClick={() => setTranscriptVariant("original")}
+                                disabled={!selected.transcriptPreviewOriginal && !selected.transcriptPreview}
+                                aria-label="Show original transcript"
+                              >
+                                Original
+                              </button>
+                              <button
+                                type="button"
+                                className={[
+                                  "px-2 py-1 text-xs rounded-lg transition",
+                                  transcriptVariant === "en"
+                                    ? "bg-purple-600 text-white"
+                                    : "text-muted-foreground hover:text-foreground",
+                                ].join(" ")}
+                                onClick={() => setTranscriptVariant("en")}
+                                disabled={!selected.transcriptPreviewEn}
+                                aria-label="Show English transcript"
+                              >
+                                English
+                              </button>
+                            </div>
+
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="rounded-xl h-8 px-2"
+                              onClick={() => setTranscriptExpanded((v) => !v)}
+                            >
+                              {transcriptExpanded ? (
+                                <>
+                                  <ChevronUp className="h-4 w-4 mr-1" /> Less
+                                </>
+                              ) : (
+                                <>
+                                  <ChevronDown className="h-4 w-4 mr-1" /> More
+                                </>
+                              )}
+                            </Button>
+                          </div>
+                        </div>
+                        <div
+                          className={[
+                            "mt-1 text-sm text-muted-foreground",
+                            transcriptExpanded ? "max-h-[280px] overflow-auto pr-2" : "line-clamp-4",
+                          ].join(" ")}
+                        >
+                          {transcriptVariant === "en"
+                            ? selected.transcriptPreviewEn ?? selected.transcriptPreview
+                            : selected.transcriptPreviewOriginal ?? selected.transcriptPreview}
                         </div>
                       </div>
 
@@ -795,7 +936,7 @@ export default function App() {
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           <Badge variant="outline" className="rounded-xl">
-                            {selected.language}
+                            {selected.detectedLanguage ? selected.detectedLanguage : selected.language}
                           </Badge>
                           {priorityPill(selected.priority)}
                         </div>
@@ -846,7 +987,14 @@ export default function App() {
                   {needsAction.length === 0 ? (
                     <div className="text-sm text-muted-foreground">Nothing pending.</div>
                   ) : (
-                    needsAction.map((c) => <CallRow key={c.id} call={c} onSelect={setSelected} />)
+                    needsAction.map((c) => (
+                    <CallRow
+                      key={c.id}
+                      call={c}
+                      onSelect={setSelected}
+                      isSelected={selected?.id === c.id}
+                    />
+                  ))
                   )}
                 </CardContent>
               </Card>
