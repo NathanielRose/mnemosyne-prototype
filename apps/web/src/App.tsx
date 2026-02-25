@@ -130,6 +130,8 @@ type CallRecord = {
   detectedLanguage?: string;
   transcriptPreviewOriginal?: string;
   transcriptPreviewEn?: string;
+  transcriptOriginal?: string;
+  transcriptEnglish?: string;
   outcome: CallOutcome;
   priority: "Low" | "Medium" | "High";
   summary: string;
@@ -153,6 +155,8 @@ type ApiCall = {
   detectedLanguage?: string | null;
   transcriptPreviewOriginal?: string | null;
   transcriptPreviewEn?: string | null;
+  transcriptOriginal?: string | null;
+  transcriptEnglish?: string | null;
   outcome: CallOutcome;
   priority: CallRecord["priority"];
   summary: string;
@@ -500,6 +504,8 @@ function mapApiCall(row: ApiCall): CallRecord {
     detectedLanguage: row.detectedLanguage ?? undefined,
     transcriptPreviewOriginal: row.transcriptPreviewOriginal ?? undefined,
     transcriptPreviewEn: row.transcriptPreviewEn ?? undefined,
+    transcriptOriginal: row.transcriptOriginal ?? undefined,
+    transcriptEnglish: row.transcriptEnglish ?? undefined,
     outcome: row.outcome,
     priority: row.priority,
     summary: row.summary,
@@ -921,13 +927,17 @@ export default function App() {
                         </div>
                         <div
                           className={[
-                            "mt-1 text-sm text-muted-foreground",
-                            transcriptExpanded ? "max-h-[280px] overflow-auto pr-2" : "line-clamp-4",
+                            "mt-1 text-sm text-muted-foreground whitespace-pre-wrap",
+                            transcriptExpanded ? "" : "line-clamp-4",
                           ].join(" ")}
                         >
                           {transcriptVariant === "en"
-                            ? selected.transcriptPreviewEn ?? selected.transcriptPreview
-                            : selected.transcriptPreviewOriginal ?? selected.transcriptPreview}
+                            ? selected.transcriptEnglish ??
+                              selected.transcriptPreviewEn ??
+                              selected.transcriptPreview
+                            : selected.transcriptOriginal ??
+                              selected.transcriptPreviewOriginal ??
+                              selected.transcriptPreview}
                         </div>
                       </div>
 

@@ -206,17 +206,27 @@ app.get("/calls", async (request, reply) => {
       .offset(safeOffset);
 
     const shaped = rows.map((r) => {
-      const transcriptPreviewOriginal =
+      const transcriptOriginal =
         typeof r.transcriptOriginal === "string" && r.transcriptOriginal.trim().length
-          ? r.transcriptOriginal.trim().slice(0, 280)
+          ? r.transcriptOriginal.trim()
+          : null;
+      const transcriptEnglish =
+        typeof r.transcriptEnglish === "string" && r.transcriptEnglish.trim().length
+          ? r.transcriptEnglish.trim()
+          : null;
+      const transcriptPreviewOriginal =
+        transcriptOriginal
+          ? transcriptOriginal.slice(0, 280)
           : null;
       const transcriptPreviewEn =
-        typeof r.transcriptEnglish === "string" && r.transcriptEnglish.trim().length
-          ? r.transcriptEnglish.trim().slice(0, 280)
+        transcriptEnglish
+          ? transcriptEnglish.slice(0, 280)
           : null;
 
       return {
         ...r.call,
+        transcriptOriginal,
+        transcriptEnglish,
         transcriptPreviewOriginal,
         transcriptPreviewEn,
       };
