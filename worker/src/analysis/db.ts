@@ -222,6 +222,12 @@ function toConfidence(v: number) {
   return bounded.toFixed(3);
 }
 
+function parseOptionalDueDate(value: string | null): Date | null {
+  if (!value || !value.trim()) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 export async function saveSuggestedAnalysis(params: {
   callId: string;
   transcriptHash: string;
@@ -246,7 +252,7 @@ export async function saveSuggestedAnalysis(params: {
         title: task.title,
         description: task.description,
         assigneeSuggestion: task.assignee_suggestion,
-        dueAt: task.due ? new Date(task.due) : null,
+        dueAt: parseOptionalDueDate(task.due),
         priority: task.priority,
         status: task.status,
         evidenceQuotes: task.evidence_quotes as any,
