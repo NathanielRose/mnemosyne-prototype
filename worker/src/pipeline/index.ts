@@ -17,6 +17,8 @@ import {
 import { generatePlaceholderInsights } from "./insights.js";
 import { transcribeWhisper } from "./transcribe.js";
 import { completeStep, failStep, finishRun, startRun, startStep } from "./track.js";
+import { enqueueAnalysisJob } from "../analysis/queue.js";
+import { markAnalysisFailed, markAnalysisQueued } from "../analysis/db.js";
 
 function errorToString(err: unknown) {
   if (err instanceof Error) return err.stack || err.message;
@@ -39,6 +41,13 @@ function formatDetectedLanguage(lang: string) {
   if (!raw) return "unknown";
   if (raw.length <= 3) return raw.toUpperCase();
   return raw[0]!.toUpperCase() + raw.slice(1).toLowerCase();
+}
+
+function parseThresholdFromEnv() {
+  const raw = process.env.LLM_MIN_DURATION_SEC;
+  const parsed = raw ? Number(raw) : NaN;
+  if (Number.isFinite(parsed) && parsed >= 0) return Math.floor(parsed);
+  return 30;
 }
 
 export async function runPipeline(job: Job) {
@@ -185,7 +194,6 @@ export async function runPipeline(job: Job) {
     }
 
     // STEP: analyze_llm (placeholder insights)
-    let insightsSummary = "";
     {
       const { stepId, alreadyCompleted } = await startStep({
         runId,
@@ -204,7 +212,6 @@ export async function runPipeline(job: Job) {
             : transcriptText;
 
           const data = generatePlaceholderInsights({ transcriptText: insightsSourceText, language: transcriptLang });
-          insightsSummary = typeof data.summary === "string" ? data.summary : "";
           const insightsId = await insertInsights({ recordingId, data });
           await completeStep({ stepId, meta: { skipped: false, insightsId } });
         }
@@ -226,7 +233,6 @@ export async function runPipeline(job: Job) {
           await updateCallPostProcessing({
             callId,
             transcriptText: transcriptEnglishText?.trim().length ? transcriptEnglishText : transcriptText,
-            summary: insightsSummary,
             detectedLanguage: transcriptDetectedLanguage,
             language: transcriptLang,
           });
@@ -237,6 +243,32 @@ export async function runPipeline(job: Job) {
         await failStep({ stepId, error: err });
         throw err;
       }
+    }
+
+    // enqueue follow-up analysis job (separate job type).
+    try {
+      const thresholdSec = parseThresholdFromEnv();
+      const enqueued = await enqueueAnalysisJob({ callSid, recordingSid, callId });
+      await markAnalysisQueued({ callSid, thresholdSec });
+      console.log("[pipeline] analysis job enqueued", {
+        ...logBase,
+        callId,
+        analysisJobId: enqueued.jobId,
+        thresholdSec,
+      });
+    } catch (err) {
+      const thresholdSec = parseThresholdFromEnv();
+      await markAnalysisFailed({
+        callId,
+        thresholdSec,
+        reason: "analysis_enqueue_failed",
+        rawOutput: errorToString(err),
+      });
+      console.error("[pipeline] analysis enqueue failed", {
+        ...logBase,
+        callId,
+        error: errorToString(err),
+      });
     }
 
     await finishRun({ runId, status: "completed" });

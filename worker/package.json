@@ -7,7 +7,8 @@
     "dev": "tsx watch src/recordingWorker.ts",
     "build": "tsc",
     "start": "node dist/recordingWorker.js",
-    "enqueue:test": "node scripts/enqueue-test-job.mjs"
+    "enqueue:test": "node scripts/enqueue-test-job.mjs",
+    "test": "tsx src/analysis/run-tests.ts"
   },
   "dependencies": {
     "bullmq": "^5.25.0",

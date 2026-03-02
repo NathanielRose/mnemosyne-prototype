@@ -1,6 +1,8 @@
 import "dotenv/config";
 import { Worker } from "bullmq";
 import { runPipeline } from "./pipeline/index.js";
+import { runCallAnalysisJob } from "./analysis/analysisWorker.js";
+import { ANALYSIS_JOB_NAME } from "./analysis/queue.js";
 
 const redisUrl = process.env.REDIS_URL;
 if (!redisUrl) {
@@ -33,6 +35,9 @@ const worker = new Worker(
       recordingUrl,
     });
 
+    if (job.name === ANALYSIS_JOB_NAME) {
+      return await runCallAnalysisJob(job.data);
+    }
     return await runPipeline(job);
   },
   {

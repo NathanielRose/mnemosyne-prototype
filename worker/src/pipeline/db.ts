@@ -337,7 +337,6 @@ export async function updateCallPostProcessing(params: {
   detectedLanguage?: string;
   language?: string;
   transcriptText?: string;
-  summary?: string;
 }) {
   const db = getDb();
   const now = new Date();
@@ -350,7 +349,6 @@ export async function updateCallPostProcessing(params: {
     .update(calls)
     .set({
       transcriptPreview: preview,
-      summary: params.summary ?? "",
       detectedLanguage: params.detectedLanguage ?? null,
       language: params.language ?? "English",
       updatedAt: now,

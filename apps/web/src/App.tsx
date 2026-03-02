@@ -12,6 +12,7 @@ import {
   ChevronRight,
   ChevronDown,
   ChevronUp,
+  Star,
   Bell,
   X,
 } from "lucide-react";
@@ -98,6 +99,12 @@ const formatWhen = (iso: string) => {
   return `${weekday} ${time}`;
 };
 
+const hasNonEmptyText = (value?: string | null) =>
+  typeof value === "string" && value.trim().length > 0;
+
+const getSummaryText = (value?: string | null) =>
+  hasNonEmptyText(value) ? value!.trim() : "No summary yet";
+
 // Tiny “test cases” (runs in dev; harmless in prod)
 console.assert(formatSecs(0) === "0:00", "formatSecs(0) should be 0:00");
 console.assert(formatSecs(61) === "1:01", "formatSecs(61) should be 1:01");
@@ -124,6 +131,7 @@ type CallRecord = {
   when: string; // e.g., "Today 09:12"
   iso: string; // e.g., "2026-01-28T09:12:00"
   from: string;
+  callerName?: string;
   to?: string;
   durationSec: number;
   language: "Greek" | "English";
@@ -136,6 +144,7 @@ type CallRecord = {
   priority: "Low" | "Medium" | "High";
   summary: string;
   transcriptPreview: string;
+  notes?: string;
   extracted?: Partial<ReservationDraft>;
   requiresAction: boolean;
 
@@ -149,6 +158,8 @@ type ApiCall = {
   externalId: string;
   startedAt: string;
   fromNumber: string;
+  callerName?: string | null;
+  callerNameSource?: string | null;
   toNumber?: string | null;
   durationSec: number;
   language: CallRecord["language"];
@@ -161,9 +172,89 @@ type ApiCall = {
   priority: CallRecord["priority"];
   summary: string;
   transcriptPreview: string | null;
+  notes?: string | null;
   requiresAction: boolean;
   tag: string | null;
   rateEur: number | string | null;
+};
+
+type ConfirmedTask = {
+  id: string;
+  callId: string;
+  externalId: string;
+  when: string;
+  fromNumber: string;
+  callerName?: string | null;
+  title: string;
+  description: string;
+  assigneeSuggestion?: string | null;
+  dueAt?: string | null;
+  priority: string;
+  status: string;
+  confidence?: number | null;
+  evidenceQuotes: string[];
+};
+
+type SuggestedTask = {
+  id: string;
+  title: string;
+  description: string;
+  assigneeSuggestion?: string | null;
+  dueAt?: string | null;
+  priority: string;
+  status: string;
+  evidenceQuotes: string[];
+  confidence?: number | null;
+};
+
+type SuggestedTag = {
+  id: string;
+  tag: string;
+  confidence?: number | null;
+};
+
+type SuggestedParticipant = {
+  id: string;
+  name?: string | null;
+  role: string;
+  confidence?: number | null;
+  evidenceQuotes: string[];
+};
+
+type CallAnalysis = {
+  callId: string;
+  externalId: string;
+  status?: string | null;
+  reason?: string | null;
+  model?: string | null;
+  ranAt?: string | null;
+  thresholdSec?: number | null;
+  summaryShort?: string | null;
+  summaryDetailed?: string | null;
+  quality?: {
+    transcriptReliability?: string | null;
+    hallucinationRisk?: string | null;
+    notes?: string | null;
+  } | null;
+  tasks: SuggestedTask[];
+  tags: SuggestedTag[];
+  participants: SuggestedParticipant[];
+};
+
+type AnalysisSelectionState = {
+  summaryShort: boolean;
+  summaryDetailed: boolean;
+  taskIds: Record<string, boolean>;
+  tagIds: Record<string, boolean>;
+  participantIds: Record<string, boolean>;
+};
+
+const EMPTY_ANALYSIS_SELECTION: AnalysisSelectionState = {
+  summaryShort: false,
+  summaryDetailed: false,
+  taskIds: {},
+  tagIds: {},
+  participantIds: {},
 };
 
 const outcomeBadge = (outcome: CallOutcome) => {
@@ -239,6 +330,8 @@ function CallRow({
   onSelect: (c: CallRecord) => void;
   isSelected?: boolean;
 }) {
+  const hasSummary = hasNonEmptyText(call.summary);
+  const summaryText = getSummaryText(call.summary);
   return (
     <button
       className="w-full text-left"
@@ -280,8 +373,18 @@ function CallRow({
               <div className="mt-2 text-sm text-muted-foreground truncate flex items-center gap-1">
                 <Phone className="h-4 w-4 shrink-0" /> From: {call.from}
               </div>
+              <div className="mt-1 text-sm text-muted-foreground truncate">
+                Caller: {call.callerName?.trim() ? call.callerName : "Unknown"}
+              </div>
 
-              <div className="mt-2 text-sm leading-5 line-clamp-2">{call.summary}</div>
+              <div
+                className={[
+                  "mt-2 text-sm leading-5 line-clamp-2",
+                  hasSummary ? "" : "text-muted-foreground italic",
+                ].join(" ")}
+              >
+                {summaryText}
+              </div>
             </div>
 
             <div className="flex flex-col items-end gap-2 shrink-0">
@@ -498,6 +601,7 @@ function mapApiCall(row: ApiCall): CallRecord {
     when: formatWhen(iso),
     iso,
     from: row.fromNumber,
+    callerName: row.callerName ?? undefined,
     to: row.toNumber ?? undefined,
     durationSec: row.durationSec,
     language: row.language,
@@ -510,6 +614,7 @@ function mapApiCall(row: ApiCall): CallRecord {
     priority: row.priority,
     summary: row.summary,
     transcriptPreview: row.transcriptPreview ?? "(no transcript)",
+    notes: row.notes ?? undefined,
     requiresAction: row.requiresAction,
     tag: row.tag ?? undefined,
     rateEUR: Number.isFinite(rate) ? rate : undefined,
@@ -522,6 +627,29 @@ export default function App() {
   const [query, setQuery] = useState<string>("");
   const [transcriptExpanded, setTranscriptExpanded] = useState<boolean>(false);
   const [transcriptVariant, setTranscriptVariant] = useState<"original" | "en">("en");
+  const [notesDraft, setNotesDraft] = useState<string>("");
+  const [notesSaving, setNotesSaving] = useState<boolean>(false);
+  const [notesError, setNotesError] = useState<string | null>(null);
+  const [notesEditing, setNotesEditing] = useState<boolean>(false);
+  const [notesSlideIn, setNotesSlideIn] = useState<boolean>(false);
+  const [selectedAnalysis, setSelectedAnalysis] = useState<CallAnalysis | null>(null);
+  const [analysisLoading, setAnalysisLoading] = useState<boolean>(false);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [analysisSelection, setAnalysisSelection] = useState<AnalysisSelectionState>(
+    EMPTY_ANALYSIS_SELECTION
+  );
+  const [acceptingSuggestions, setAcceptingSuggestions] = useState<boolean>(false);
+  const [acceptSuggestionsError, setAcceptSuggestionsError] = useState<string | null>(null);
+  const [dismissingSuggestions, setDismissingSuggestions] = useState<boolean>(false);
+  const [dismissSuggestionsError, setDismissSuggestionsError] = useState<string | null>(null);
+  const [callerDraft, setCallerDraft] = useState<string>("");
+  const [callerEditing, setCallerEditing] = useState<boolean>(false);
+  const [callerSaving, setCallerSaving] = useState<boolean>(false);
+  const [callerError, setCallerError] = useState<string | null>(null);
+  const [confirmedTasks, setConfirmedTasks] = useState<ConfirmedTask[]>([]);
+  const [confirmedTasksLoading, setConfirmedTasksLoading] = useState<boolean>(false);
+  const [confirmedTasksError, setConfirmedTasksError] = useState<string | null>(null);
+  const [expandedEvidence, setExpandedEvidence] = useState<Record<string, boolean>>({});
   const [hasMoreCalls, setHasMoreCalls] = useState<boolean>(false);
   const [loadingMoreCalls, setLoadingMoreCalls] = useState<boolean>(false);
 
@@ -566,6 +694,76 @@ export default function App() {
   useEffect(() => {
     setTranscriptExpanded(false);
     setTranscriptVariant(selected?.transcriptPreviewEn ? "en" : "original");
+    setNotesDraft(selected?.notes ?? "");
+    setNotesError(null);
+    setNotesEditing(!(selected?.notes ?? "").trim().length);
+    setNotesSlideIn(false);
+    setAnalysisSelection(EMPTY_ANALYSIS_SELECTION);
+    setAcceptSuggestionsError(null);
+    setDismissSuggestionsError(null);
+    setCallerDraft(selected?.callerName ?? "");
+    setCallerEditing(false);
+    setCallerError(null);
+    setExpandedEvidence({});
+  }, [selected?.id]);
+
+  const loadConfirmedTasks = async () => {
+    setConfirmedTasksLoading(true);
+    setConfirmedTasksError(null);
+    try {
+      const res = await fetch(`${apiBaseUrl}/tasks?state=confirmed`);
+      if (!res.ok) throw new Error(`Failed to load tasks: ${res.status}`);
+      const data = (await res.json()) as { ok?: boolean; tasks?: ConfirmedTask[] };
+      setConfirmedTasks(Array.isArray(data.tasks) ? data.tasks : []);
+    } catch {
+      setConfirmedTasks([]);
+      setConfirmedTasksError("Could not load confirmed tasks.");
+    } finally {
+      setConfirmedTasksLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadConfirmedTasks();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      if (!selected?.id) {
+        if (!cancelled) {
+          setSelectedAnalysis(null);
+          setAnalysisError(null);
+        }
+        return;
+      }
+      setAnalysisLoading(true);
+      setAnalysisError(null);
+      try {
+        const res = await fetch(
+          `${apiBaseUrl}/calls/${encodeURIComponent(selected.id)}/analysis`
+        );
+        if (res.status === 404) {
+          if (!cancelled) setSelectedAnalysis(null);
+          return;
+        }
+        if (!res.ok) throw new Error(`Failed to load analysis: ${res.status}`);
+        const data = (await res.json()) as { ok?: boolean; analysis?: CallAnalysis };
+        if (!cancelled) {
+          setSelectedAnalysis(data?.analysis ?? null);
+        }
+      } catch {
+        if (!cancelled) {
+          setAnalysisError("Could not load AI suggestions yet.");
+        }
+      } finally {
+        if (!cancelled) setAnalysisLoading(false);
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
   }, [selected?.id]);
 
   const filtered = useMemo(() => {
@@ -584,8 +782,15 @@ export default function App() {
   }, [calls]);
 
   const needsAction = useMemo(() => {
-    return filtered.filter((c) => c.requiresAction);
-  }, [filtered]);
+    if (!query.trim()) return confirmedTasks;
+    const q = query.toLowerCase();
+    return confirmedTasks.filter((t) =>
+      [t.title, t.description, t.externalId, t.fromNumber, t.callerName ?? ""]
+        .join(" ")
+        .toLowerCase()
+        .includes(q)
+    );
+  }, [confirmedTasks, query]);
 
   const avgLen = useMemo(() => {
     const xs = calls.map((c) => c.durationSec);
@@ -601,6 +806,53 @@ export default function App() {
   const notifCount = useMemo(() => {
     return calls.filter((c) => c.requiresAction).length;
   }, [calls]);
+  const formatConfidence = (v?: number | null) =>
+    typeof v === "number" && Number.isFinite(v) ? `${Math.round(v * 100)}%` : "n/a";
+  const toggleEvidence = (key: string) =>
+    setExpandedEvidence((prev) => ({ ...prev, [key]: !prev[key] }));
+  const toggleAnalysisSelection = (
+    kind: "summaryShort" | "summaryDetailed" | "taskIds" | "tagIds" | "participantIds",
+    id?: string
+  ) => {
+    setAnalysisSelection((prev) => {
+      if (kind === "summaryShort" || kind === "summaryDetailed") {
+        return {
+          ...prev,
+          [kind]: !prev[kind],
+        };
+      }
+      if (!id) return prev;
+      return {
+        ...prev,
+        [kind]: {
+          ...prev[kind],
+          [id]: !prev[kind][id],
+        },
+      };
+    });
+  };
+  const selectedSuggestionCount =
+    (analysisSelection.summaryShort ? 1 : 0) +
+    (analysisSelection.summaryDetailed ? 1 : 0) +
+    Object.values(analysisSelection.taskIds).filter(Boolean).length +
+    Object.values(analysisSelection.tagIds).filter(Boolean).length +
+    Object.values(analysisSelection.participantIds).filter(Boolean).length;
+  const analysisForDisplay = selectedAnalysis;
+  const hasPendingAnalysisSuggestions = !!selectedAnalysis && (
+    (selectedAnalysis.summaryShort ?? "").trim().length > 0 ||
+    (selectedAnalysis.summaryDetailed ?? "").trim().length > 0 ||
+    selectedAnalysis.tasks.length > 0 ||
+    selectedAnalysis.tags.length > 0 ||
+    selectedAnalysis.participants.length > 0
+  );
+  const persistedNotes = (selected?.notes ?? "").trim();
+  const draftNotes = notesDraft.trim();
+  const hasNoteChanges = !!selected && draftNotes !== persistedNotes;
+  const showSaveNotesButton =
+    !!selected &&
+    notesEditing &&
+    hasNoteChanges &&
+    (draftNotes.length > 0 || persistedNotes.length > 0);
 
   const handleSaveReservation = (draft: ReservationDraft) => {
     if (!selected) return;
@@ -627,6 +879,236 @@ export default function App() {
           : c
       )
     );
+  };
+
+  const handleSaveNotes = async () => {
+    if (!selected || notesSaving) return;
+    setNotesSaving(true);
+    setNotesError(null);
+    try {
+      const res = await fetch(
+        `${apiBaseUrl}/calls/${encodeURIComponent(selected.id)}/notes`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ notes: notesDraft }),
+        }
+      );
+      if (!res.ok) {
+        throw new Error(`Failed to save notes: ${res.status}`);
+      }
+      const data = (await res.json()) as {
+        ok?: boolean;
+        call?: { externalId?: string; notes?: string | null };
+      };
+      const savedNotes = data.call?.notes ?? null;
+      setCalls((prev) =>
+        prev.map((c) =>
+          c.id === selected.id
+            ? {
+                ...c,
+                notes: savedNotes ?? undefined,
+              }
+            : c
+        )
+      );
+      setSelected((prev) =>
+        prev && prev.id === selected.id
+          ? {
+              ...prev,
+              notes: savedNotes ?? undefined,
+            }
+          : prev
+      );
+      setNotesDraft(savedNotes ?? "");
+      setNotesEditing(false);
+      setNotesSlideIn(true);
+      setTimeout(() => setNotesSlideIn(false), 350);
+    } catch {
+      setNotesError("Could not save notes. Please try again.");
+    } finally {
+      setNotesSaving(false);
+    }
+  };
+
+  const handleEditNotes = () => {
+    if (!selected) return;
+    setNotesDraft(selected.notes ?? "");
+    setNotesError(null);
+    setNotesEditing(true);
+  };
+
+  const handleCancelNotesEdit = () => {
+    if (!selected) return;
+    setNotesDraft(selected.notes ?? "");
+    setNotesError(null);
+    setNotesEditing(false);
+  };
+
+  const handleSaveCaller = async () => {
+    if (!selected || callerSaving) return;
+    setCallerSaving(true);
+    setCallerError(null);
+    try {
+      const res = await fetch(`${apiBaseUrl}/calls/${encodeURIComponent(selected.id)}/caller`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ callerName: callerDraft }),
+      });
+      if (!res.ok) throw new Error(`Failed to save caller: ${res.status}`);
+      const data = (await res.json()) as {
+        ok?: boolean;
+        call?: { callerName?: string | null };
+      };
+      const nextCaller = data.call?.callerName ?? null;
+      setCalls((prev) =>
+        prev.map((c) => (c.id === selected.id ? { ...c, callerName: nextCaller ?? undefined } : c))
+      );
+      setSelected((prev) =>
+        prev && prev.id === selected.id ? { ...prev, callerName: nextCaller ?? undefined } : prev
+      );
+      setCallerDraft(nextCaller ?? "");
+      setCallerEditing(false);
+      await loadConfirmedTasks();
+    } catch {
+      setCallerError("Could not save caller name.");
+    } finally {
+      setCallerSaving(false);
+    }
+  };
+
+  const handleDismissAllSuggestions = async () => {
+    if (!selected || !selectedAnalysis || dismissingSuggestions) return;
+    setDismissingSuggestions(true);
+    setDismissSuggestionsError(null);
+    try {
+      const res = await fetch(
+        `${apiBaseUrl}/calls/${encodeURIComponent(selected.id)}/analysis/dismiss`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ all: true }),
+        }
+      );
+      if (!res.ok) throw new Error(`Failed to dismiss suggestions: ${res.status}`);
+
+      const analysisRes = await fetch(`${apiBaseUrl}/calls/${encodeURIComponent(selected.id)}/analysis`);
+      if (analysisRes.ok) {
+        const analysisData = (await analysisRes.json()) as { analysis?: CallAnalysis };
+        setSelectedAnalysis(analysisData.analysis ?? null);
+      } else if (analysisRes.status === 404) {
+        setSelectedAnalysis(null);
+      }
+      setAnalysisSelection(EMPTY_ANALYSIS_SELECTION);
+      await loadConfirmedTasks();
+    } catch {
+      setDismissSuggestionsError("Could not dismiss all suggestions. Please try again.");
+    } finally {
+      setDismissingSuggestions(false);
+    }
+  };
+
+  const handleAcceptSelectedSuggestions = async () => {
+    if (!selected || !selectedAnalysis || selectedSuggestionCount === 0 || acceptingSuggestions) return;
+    setAcceptingSuggestions(true);
+    setAcceptSuggestionsError(null);
+    try {
+      const payload = {
+        summaryShort: analysisSelection.summaryShort,
+        summaryDetailed: analysisSelection.summaryDetailed,
+        taskIds: Object.entries(analysisSelection.taskIds)
+          .filter(([, checked]) => checked)
+          .map(([id]) => id),
+        tagIds: Object.entries(analysisSelection.tagIds)
+          .filter(([, checked]) => checked)
+          .map(([id]) => id),
+        participantIds: Object.entries(analysisSelection.participantIds)
+          .filter(([, checked]) => checked)
+          .map(([id]) => id),
+      };
+
+      const res = await fetch(
+        `${apiBaseUrl}/calls/${encodeURIComponent(selected.id)}/analysis/accept`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }
+      );
+      if (!res.ok) {
+        throw new Error(`Failed to accept suggestions: ${res.status}`);
+      }
+      const data = (await res.json()) as {
+        ok?: boolean;
+        call?: { summary?: string | null; tag?: string | null; callerName?: string | null };
+      };
+
+      setCalls((prev) =>
+        prev.map((c) =>
+          c.id === selected.id
+            ? {
+                ...c,
+                summary:
+                  typeof data.call?.summary === "string"
+                    ? data.call.summary
+                    : c.summary,
+                tag:
+                  typeof data.call?.tag === "string"
+                    ? data.call.tag
+                    : data.call?.tag === null
+                      ? undefined
+                      : c.tag,
+                callerName:
+                  typeof data.call?.callerName === "string"
+                    ? data.call.callerName
+                    : data.call?.callerName === null
+                      ? undefined
+                      : c.callerName,
+              }
+            : c
+        )
+      );
+      setSelected((prev) =>
+        prev && prev.id === selected.id
+          ? {
+              ...prev,
+              summary:
+                typeof data.call?.summary === "string"
+                  ? data.call.summary
+                  : prev.summary,
+              tag:
+                typeof data.call?.tag === "string"
+                  ? data.call.tag
+                  : data.call?.tag === null
+                    ? undefined
+                    : prev.tag,
+              callerName:
+                typeof data.call?.callerName === "string"
+                  ? data.call.callerName
+                  : data.call?.callerName === null
+                    ? undefined
+                    : prev.callerName,
+            }
+          : prev
+      );
+      if (typeof data.call?.callerName === "string" || data.call?.callerName === null) {
+        setCallerDraft(data.call?.callerName ?? "");
+      }
+
+      const analysisRes = await fetch(`${apiBaseUrl}/calls/${encodeURIComponent(selected.id)}/analysis`);
+      if (analysisRes.ok) {
+        const analysisData = (await analysisRes.json()) as { analysis?: CallAnalysis };
+        setSelectedAnalysis(analysisData.analysis ?? null);
+      } else if (analysisRes.status === 404) {
+        setSelectedAnalysis(null);
+      }
+      setAnalysisSelection(EMPTY_ANALYSIS_SELECTION);
+      await loadConfirmedTasks();
+    } catch {
+      setAcceptSuggestionsError("Could not accept selected suggestions. Please try again.");
+    } finally {
+      setAcceptingSuggestions(false);
+    }
   };
 
   return (
@@ -853,8 +1335,66 @@ export default function App() {
                       </div>
 
                       <div className="text-sm text-muted-foreground">
-                        Caller: {selected.from}
+                        From: {selected.from}
                         {selected.to ? ` • Receiver: ${selected.to}` : ""}
+                      </div>
+
+                      <div>
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-sm font-medium">Caller</div>
+                          {callerEditing ? (
+                            <div className="flex items-center gap-2">
+                              <Button
+                                type="button"
+                                size="sm"
+                                className="rounded-xl h-8 px-3"
+                                disabled={callerSaving}
+                                onClick={handleSaveCaller}
+                              >
+                                {callerSaving ? "Saving..." : "Save caller"}
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="rounded-xl h-8 px-3"
+                                disabled={callerSaving}
+                                onClick={() => {
+                                  setCallerDraft(selected.callerName ?? "");
+                                  setCallerEditing(false);
+                                  setCallerError(null);
+                                }}
+                              >
+                                Cancel
+                              </Button>
+                            </div>
+                          ) : (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="rounded-xl h-8 px-3"
+                              onClick={() => setCallerEditing(true)}
+                            >
+                              Edit
+                            </Button>
+                          )}
+                        </div>
+                        {callerEditing ? (
+                          <Input
+                            value={callerDraft}
+                            onChange={(e) => setCallerDraft(e.target.value)}
+                            placeholder="Set caller name (AI inferred or manual)"
+                            className="mt-2"
+                          />
+                        ) : (
+                          <div className="mt-1 text-sm text-muted-foreground">
+                            {selected.callerName?.trim() ? selected.callerName : "Unknown"}
+                          </div>
+                        )}
+                        {callerError ? (
+                          <div className="mt-1 text-xs text-red-600">{callerError}</div>
+                        ) : null}
                       </div>
 
                       <div className="flex items-center justify-between text-sm">
@@ -866,8 +1406,15 @@ export default function App() {
 
                       <div>
                         <div className="text-sm font-medium">Summary</div>
-                        <div className="mt-1 text-sm text-muted-foreground">
-                          {selected.summary}
+                        <div
+                          className={[
+                            "mt-1 text-sm",
+                            hasNonEmptyText(selected.summary)
+                              ? "text-muted-foreground"
+                              : "text-muted-foreground italic",
+                          ].join(" ")}
+                        >
+                          {getSummaryText(selected.summary)}
                         </div>
                       </div>
 
@@ -941,6 +1488,304 @@ export default function App() {
                         </div>
                       </div>
 
+                      <div>
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-sm font-medium">Notes</div>
+                          <div className="flex items-center gap-2">
+                            {notesEditing ? (
+                              <>
+                                {showSaveNotesButton && (
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    className="rounded-xl h-8 px-3"
+                                    disabled={notesSaving}
+                                    onClick={handleSaveNotes}
+                                  >
+                                    {notesSaving ? "Saving..." : "Save notes"}
+                                  </Button>
+                                )}
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  className="rounded-xl h-8 px-3"
+                                  disabled={notesSaving}
+                                  onClick={handleCancelNotesEdit}
+                                >
+                                  Cancel
+                                </Button>
+                              </>
+                            ) : (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="rounded-xl h-8 px-3"
+                                onClick={handleEditNotes}
+                              >
+                                Edit
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+                        {notesEditing ? (
+                          <Textarea
+                            value={notesDraft}
+                            onChange={(e) => setNotesDraft(e.target.value)}
+                            placeholder="Add private notes about this call..."
+                            className="mt-2 min-h-[96px]"
+                          />
+                        ) : (
+                          <div
+                            className={[
+                              "mt-2 text-sm text-muted-foreground italic whitespace-pre-wrap",
+                              "transform transition-all duration-300",
+                              notesSlideIn ? "-translate-x-2 opacity-70" : "translate-x-0 opacity-100",
+                            ].join(" ")}
+                          >
+                            {persistedNotes.length
+                              ? persistedNotes
+                              : "No notes yet. Click Edit to add one."}
+                          </div>
+                        )}
+                        {notesError ? (
+                          <div className="mt-1 text-xs text-red-600">{notesError}</div>
+                        ) : null}
+                      </div>
+
+                      {analysisLoading || analysisError || hasPendingAnalysisSuggestions ? (
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="flex items-center gap-2 text-sm font-medium">
+                              <Star className="h-4 w-4 text-amber-500" />
+                              AI Suggested
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="h-7 rounded-lg px-2 text-xs"
+                                onClick={handleDismissAllSuggestions}
+                                disabled={dismissingSuggestions || !selectedAnalysis}
+                              >
+                                {dismissingSuggestions ? "Dismissing..." : "Dismiss all"}
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                className="h-7 rounded-lg px-2 text-xs"
+                                onClick={handleAcceptSelectedSuggestions}
+                                disabled={
+                                  selectedSuggestionCount === 0 || acceptingSuggestions || !selectedAnalysis
+                                }
+                              >
+                                <CheckCircle2 className="h-3 w-3 mr-1" />
+                                {acceptingSuggestions
+                                  ? "Accepting..."
+                                  : `Accept selected${selectedSuggestionCount ? ` (${selectedSuggestionCount})` : ""}`}
+                              </Button>
+                            </div>
+                          </div>
+                          {analysisLoading ? (
+                            <div className="text-xs text-muted-foreground">Loading suggestions...</div>
+                          ) : analysisError ? (
+                            <div className="text-xs text-red-600">{analysisError}</div>
+                          ) : analysisForDisplay ? (
+                            <div className="space-y-2 rounded-xl border border-zinc-200 bg-zinc-50/70 p-3">
+                            <div className="text-xs text-muted-foreground">
+                              Status: {analysisForDisplay.status ?? "unknown"}
+                              {analysisForDisplay.reason
+                                ? ` • Reason: ${analysisForDisplay.reason}`
+                                : ""}
+                              {analysisForDisplay.model
+                                ? ` • Model: ${analysisForDisplay.model}`
+                                : ""}
+                            </div>
+
+                            <div className="rounded-lg border border-zinc-200 bg-white/80 p-2">
+                              <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                                Summary
+                              </div>
+                              <div className="mt-1 text-xs text-muted-foreground">
+                                Short = concise paragraph for feed. Detailed = fuller paragraph for call details.
+                              </div>
+                              <div className="mt-1 flex flex-wrap items-center gap-3">
+                                <label className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                                  <input
+                                    type="checkbox"
+                                    checked={analysisSelection.summaryShort}
+                                    onChange={() => toggleAnalysisSelection("summaryShort")}
+                                  />
+                                  Select short
+                                </label>
+                                <label className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                                  <input
+                                    type="checkbox"
+                                    checked={analysisSelection.summaryDetailed}
+                                    onChange={() => toggleAnalysisSelection("summaryDetailed")}
+                                  />
+                                  Select detailed
+                                </label>
+                              </div>
+                              <div className="text-sm">{analysisForDisplay.summaryShort || "-"}</div>
+                              <div className="mt-1 text-sm text-muted-foreground whitespace-pre-wrap">
+                                {analysisForDisplay.summaryDetailed || "-"}
+                              </div>
+                            </div>
+
+                            <div>
+                              <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                                Tasks ({analysisForDisplay.tasks.length})
+                              </div>
+                              <div className="space-y-2 mt-1">
+                                {analysisForDisplay.tasks.map((task) => {
+                                  const evidenceKey = `task-${task.id}`;
+                                  const open = !!expandedEvidence[evidenceKey];
+                                  return (
+                                    <div key={task.id} className="rounded-lg border border-zinc-200 bg-white/80 p-2">
+                                      <div className="flex items-center justify-between gap-2">
+                                        <div className="text-sm font-medium">{task.title}</div>
+                                        <label className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                                          <input
+                                            type="checkbox"
+                                            checked={!!analysisSelection.taskIds[task.id]}
+                                            onChange={() => toggleAnalysisSelection("taskIds", task.id)}
+                                          />
+                                          Select
+                                        </label>
+                                      </div>
+                                      <div className="text-xs text-muted-foreground">{task.description}</div>
+                                      <div className="text-xs text-muted-foreground mt-1">
+                                        Priority: {task.priority} • Status: {task.status} • Confidence:{" "}
+                                        {formatConfidence(task.confidence)}
+                                      </div>
+                                      <Button
+                                        type="button"
+                                        variant="outline"
+                                        size="sm"
+                                        className="mt-2 h-7 rounded-lg px-2 text-xs"
+                                        onClick={() => toggleEvidence(evidenceKey)}
+                                      >
+                                        {open ? (
+                                          <>
+                                            <ChevronUp className="h-3 w-3 mr-1" /> Hide evidence
+                                          </>
+                                        ) : (
+                                          <>
+                                            <ChevronDown className="h-3 w-3 mr-1" /> Show evidence
+                                          </>
+                                        )}
+                                      </Button>
+                                      {open && (
+                                        <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
+                                          {task.evidenceQuotes.map((q, idx) => (
+                                            <li key={`${task.id}-${idx}`} className="italic">
+                                              "{q}"
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+
+                            <div>
+                              <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                                Tags ({analysisForDisplay.tags.length})
+                              </div>
+                              <div className="mt-1 flex flex-wrap gap-2">
+                                {analysisForDisplay.tags.map((tag) => (
+                                  <button
+                                    type="button"
+                                    key={tag.id}
+                                    onClick={() => toggleAnalysisSelection("tagIds", tag.id)}
+                                    className={[
+                                      "rounded-xl border px-2 py-1 text-xs",
+                                      analysisSelection.tagIds[tag.id]
+                                        ? "border-purple-300 bg-purple-50 text-purple-700"
+                                        : "border-zinc-200 bg-white/80 text-muted-foreground",
+                                    ].join(" ")}
+                                  >
+                                    {tag.tag} ({formatConfidence(tag.confidence)})
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+
+                            <div>
+                              <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                                Participants ({analysisForDisplay.participants.length})
+                              </div>
+                              <div className="space-y-2 mt-1">
+                                {analysisForDisplay.participants.map((p) => {
+                                  const evidenceKey = `participant-${p.id}`;
+                                  const open = !!expandedEvidence[evidenceKey];
+                                  return (
+                                    <div key={p.id} className="rounded-lg border border-zinc-200 bg-white/80 p-2">
+                                      <div className="flex items-center justify-between gap-2">
+                                        <div className="text-sm">
+                                          {p.name ?? "Unknown"} — {p.role}
+                                        </div>
+                                        <label className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                                          <input
+                                            type="checkbox"
+                                            checked={!!analysisSelection.participantIds[p.id]}
+                                            onChange={() =>
+                                              toggleAnalysisSelection("participantIds", p.id)
+                                            }
+                                          />
+                                          Select
+                                        </label>
+                                      </div>
+                                      <div className="text-xs text-muted-foreground">
+                                        Confidence: {formatConfidence(p.confidence)}
+                                      </div>
+                                      <Button
+                                        type="button"
+                                        variant="outline"
+                                        size="sm"
+                                        className="mt-2 h-7 rounded-lg px-2 text-xs"
+                                        onClick={() => toggleEvidence(evidenceKey)}
+                                      >
+                                        {open ? (
+                                          <>
+                                            <ChevronUp className="h-3 w-3 mr-1" /> Hide evidence
+                                          </>
+                                        ) : (
+                                          <>
+                                            <ChevronDown className="h-3 w-3 mr-1" /> Show evidence
+                                          </>
+                                        )}
+                                      </Button>
+                                      {open && (
+                                        <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
+                                          {p.evidenceQuotes.map((q, idx) => (
+                                            <li key={`${p.id}-${idx}`} className="italic">
+                                              "{q}"
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                              {acceptSuggestionsError ? (
+                                <div className="text-xs text-red-600">{acceptSuggestionsError}</div>
+                              ) : null}
+                              {dismissSuggestionsError ? (
+                                <div className="text-xs text-red-600">{dismissSuggestionsError}</div>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
+
                       <Separator />
 
                       <div className="flex items-center justify-between">
@@ -990,20 +1835,51 @@ export default function App() {
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
               <Card className="rounded-2xl shadow-sm lg:col-span-2">
                 <CardHeader className="pb-2">
-                  <CardTitle className="text-lg">Calls requiring action</CardTitle>
-                  <CardDescription>Follow-up, missed calls, and pending bookings.</CardDescription>
+                  <CardTitle className="text-lg">Confirmed tasks</CardTitle>
+                  <CardDescription>Accepted AI tasks that now require action.</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3">
-                  {needsAction.length === 0 ? (
+                  {confirmedTasksLoading ? (
+                    <div className="text-sm text-muted-foreground">Loading tasks…</div>
+                  ) : confirmedTasksError ? (
+                    <div className="text-sm text-red-600">{confirmedTasksError}</div>
+                  ) : needsAction.length === 0 ? (
                     <div className="text-sm text-muted-foreground">Nothing pending.</div>
                   ) : (
                     needsAction.map((c) => (
-                    <CallRow
-                      key={c.id}
-                      call={c}
-                      onSelect={setSelected}
-                      isSelected={selected?.id === c.id}
-                    />
+                      <div
+                        key={c.id}
+                        className="rounded-2xl border border-zinc-200 bg-white/80 p-3"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-sm font-semibold">{c.title}</div>
+                            <div className="text-xs text-muted-foreground mt-1">
+                              {c.description}
+                            </div>
+                            <div className="text-xs text-muted-foreground mt-1">
+                              Call: {c.externalId} • From: {c.fromNumber} • Caller:{" "}
+                              {c.callerName?.trim() ? c.callerName : "Unknown"}
+                            </div>
+                            <div className="text-xs text-muted-foreground mt-1">
+                              Priority: {c.priority} • Status: {c.status} • Confidence:{" "}
+                              {formatConfidence(c.confidence)}
+                            </div>
+                          </div>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="rounded-xl"
+                            onClick={() => {
+                              const target = calls.find((x) => x.id === c.externalId);
+                              if (target) setSelected(target);
+                            }}
+                          >
+                            Open call
+                          </Button>
+                        </div>
+                      </div>
                   ))
                   )}
                 </CardContent>
