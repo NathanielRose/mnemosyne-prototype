@@ -23,6 +23,7 @@ const calls = pgTable("calls", {
   analysisQualityReliability: text("analysis_quality_reliability"),
   analysisQualityHallucinationRisk: text("analysis_quality_hallucination_risk"),
   analysisQualityNotes: text("analysis_quality_notes"),
+  tag: text("tag"),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
 });
 
@@ -228,6 +229,13 @@ function parseOptionalDueDate(value: string | null): Date | null {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
+function buildCanonicalTag(tags: AnalysisOutput["tags"]): string | null {
+  if (!Array.isArray(tags) || tags.length === 0) return null;
+  const unique = Array.from(new Set(tags.map((t) => t.tag).filter((t) => typeof t === "string" && t.trim().length > 0)));
+  if (unique.length === 0) return null;
+  return unique.join(", ");
+}
+
 export async function saveSuggestedAnalysis(params: {
   callId: string;
   transcriptHash: string;
@@ -298,6 +306,7 @@ export async function saveSuggestedAnalysis(params: {
       analysisThresholdSec: params.thresholdSec,
       summarySuggestedShort: params.analysis.summary_short,
       summarySuggestedDetailed: params.analysis.summary_detailed,
+      tag: buildCanonicalTag(params.analysis.tags),
       transcriptHash: params.transcriptHash,
       analysisRawOutput: null,
       analysisQualityReliability: params.analysis.quality.transcript_reliability,

@@ -19,6 +19,8 @@ export function buildAnalysisSystemPrompt() {
     "Every participant with non-null name must include at least one exact evidence quote.",
     "If evidence is missing, set participant name to null and task/participant status to info_needed.",
     "Confidence must be between 0 and 1.",
+    "Classify calls into one or more categories ONLY from this list: Reservations, Special Requests, Inquiries, Miscellaneous.",
+    "If none is explicit, use Miscellaneous.",
     "Return only JSON matching the requested schema.",
   ].join(" ");
 }
@@ -29,6 +31,8 @@ export function buildAnalysisPrompt(input: PromptInput) {
     user: [
       "Analyze this phone call transcript and produce SUGGESTED (not confirmed) outputs.",
       "Use evidence quotes exactly as text snippets from the transcript.",
+      "For tags, only output values from: Reservations, Special Requests, Inquiries, Miscellaneous.",
+      "Output at least one tag.",
       "",
       "Metadata:",
       JSON.stringify(input.metadata, null, 2),
@@ -56,7 +60,7 @@ export function buildAnalysisPrompt(input: PromptInput) {
               confidence: 0.0,
             },
           ],
-          tags: [{ tag: "string", confidence: 0.0 }],
+          tags: [{ tag: "Reservations|Special Requests|Inquiries|Miscellaneous", confidence: 0.0 }],
           participants: [
             {
               name: "string|null",

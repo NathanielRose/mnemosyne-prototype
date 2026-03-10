@@ -1,4 +1,5 @@
 import type { AnalysisOutput } from "./schema.js";
+import { CALL_CATEGORY_TAGS, type CallCategoryTag } from "./schema.js";
 
 type PostProcessInput = {
   transcriptOriginal: string;
@@ -44,9 +45,24 @@ export function postProcess(output: AnalysisOutput, input: PostProcessInput): An
     };
   });
 
+  const normalizedTagsMap = new Map<CallCategoryTag, number>();
+  output.tags.forEach((tag) => {
+    if (!CALL_CATEGORY_TAGS.includes(tag.tag)) return;
+    const key = tag.tag as CallCategoryTag;
+    const prev = normalizedTagsMap.get(key) ?? 0;
+    normalizedTagsMap.set(key, Math.max(prev, tag.confidence));
+  });
+  const tags: AnalysisOutput["tags"] = Array.from(normalizedTagsMap.entries())
+    .map(([tag, confidence]) => ({ tag, confidence }))
+    .sort((a, b) => b.confidence - a.confidence);
+  if (tags.length === 0) {
+    tags.push({ tag: "Miscellaneous", confidence: 0.55 });
+  }
+
   return {
     ...output,
     tasks,
+    tags,
     participants,
   };
 }

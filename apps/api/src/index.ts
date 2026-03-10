@@ -21,6 +21,7 @@ import { enqueueRecordingJob, getRecordingQueue } from "./queues/recordingQueue.
 const TWILIO_RECORDING_PATH = "/webhooks/twilio/recording";
 const MAX_CALL_NOTES_LENGTH = 4000;
 const CALL_TERMINAL_STATUSES = ["completed", "failed"] as const;
+const DELETED_CALL_STATUS = "deleted";
 
 function joinPublicUrl(base: string, path: string) {
   return `${base.replace(/\/+$/, "")}${path}`;
@@ -258,6 +259,56 @@ app.get("/calls", async (request, reply) => {
     reply.send(shaped);
   } catch (err: any) {
     request.log.error({ err }, "Database not configured for /calls");
+    reply.code(503).send({ ok: false, error: "DATABASE_URL not configured" });
+  }
+});
+
+app.get("/calls/deleted", async (request, reply) => {
+  const { limit, offset } = request.query as { limit?: string; offset?: string };
+  const parsedLimit = Number(limit);
+  const safeLimit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 200) : 50;
+  const parsedOffset = Number(offset);
+  const safeOffset = Number.isFinite(parsedOffset) ? Math.max(parsedOffset, 0) : 0;
+
+  try {
+    const { db } = getDb();
+    const rows = await db
+      .select({
+        call: calls,
+        transcriptOriginal: transcripts.content,
+        transcriptEnglish: transcripts.contentEn,
+      })
+      .from(calls)
+      .leftJoin(transcripts, eq(transcripts.callId, calls.id))
+      .where(eq(calls.status, DELETED_CALL_STATUS))
+      .orderBy(desc(calls.updatedAt), desc(calls.startedAt))
+      .limit(safeLimit)
+      .offset(safeOffset);
+
+    const shaped = rows.map((r) => {
+      const transcriptOriginal =
+        typeof r.transcriptOriginal === "string" && r.transcriptOriginal.trim().length
+          ? r.transcriptOriginal.trim()
+          : null;
+      const transcriptEnglish =
+        typeof r.transcriptEnglish === "string" && r.transcriptEnglish.trim().length
+          ? r.transcriptEnglish.trim()
+          : null;
+      const transcriptPreviewOriginal = transcriptOriginal ? transcriptOriginal.slice(0, 280) : null;
+      const transcriptPreviewEn = transcriptEnglish ? transcriptEnglish.slice(0, 280) : null;
+
+      return {
+        ...r.call,
+        transcriptOriginal,
+        transcriptEnglish,
+        transcriptPreviewOriginal,
+        transcriptPreviewEn,
+      };
+    });
+
+    reply.send(shaped);
+  } catch (err: any) {
+    request.log.error({ err }, "Database not configured for /calls/deleted");
     reply.code(503).send({ ok: false, error: "DATABASE_URL not configured" });
   }
 });
@@ -528,7 +579,10 @@ app.post("/calls/:externalId/analysis/accept", async (request, reply) => {
         const sorted = [...acceptedTags].sort(
           (a, b) => (toNumberOrNull(b.confidence) ?? 0) - (toNumberOrNull(a.confidence) ?? 0)
         );
-        callUpdate.tag = sorted[0]?.tag ?? null;
+        const unique = Array.from(
+          new Set(sorted.map((item) => item.tag).filter((item) => typeof item === "string" && item.trim().length > 0))
+        );
+        callUpdate.tag = unique.length ? unique.join(", ") : null;
       }
 
       const shouldAutofillCaller =
@@ -890,6 +944,33 @@ app.patch("/calls/:externalId/notes", async (request, reply) => {
     return reply.send({ ok: true, call: updated[0] });
   } catch (err: any) {
     request.log.error({ err, externalId }, "Failed to update call notes");
+    return reply.code(503).send({ ok: false, error: "DATABASE_URL not configured" });
+  }
+});
+
+app.patch("/calls/:externalId/delete", async (request, reply) => {
+  const { externalId } = request.params as { externalId?: string };
+  if (typeof externalId !== "string" || !externalId.trim()) {
+    return reply.code(400).send({ ok: false, error: "INVALID_EXTERNAL_ID" });
+  }
+  try {
+    const { db } = getDb();
+    const updated = await db
+      .update(calls)
+      .set({
+        status: DELETED_CALL_STATUS,
+        updatedAt: new Date(),
+      })
+      .where(eq(calls.externalId, externalId.trim()))
+      .returning({
+        externalId: calls.externalId,
+        status: calls.status,
+        updatedAt: calls.updatedAt,
+      });
+    if (!updated.length) return reply.code(404).send({ ok: false, error: "CALL_NOT_FOUND" });
+    return reply.send({ ok: true, call: updated[0] });
+  } catch (err: any) {
+    request.log.error({ err, externalId }, "Failed to soft-delete call");
     return reply.code(503).send({ ok: false, error: "DATABASE_URL not configured" });
   }
 });

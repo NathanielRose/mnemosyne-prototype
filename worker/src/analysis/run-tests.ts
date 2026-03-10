@@ -44,7 +44,7 @@ function testParticipantEvidenceRule() {
         confidence: 0.9,
       },
     ],
-    tags: [{ tag: "booking", confidence: 0.8 }],
+    tags: [{ tag: "Inquiries", confidence: 0.8 }],
     participants: [
       {
         name: "John Doe",

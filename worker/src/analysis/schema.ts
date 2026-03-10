@@ -1,5 +1,12 @@
 export type Confidence = number;
 export type Reliability = "low" | "medium" | "high";
+export const CALL_CATEGORY_TAGS = [
+  "Reservations",
+  "Special Requests",
+  "Inquiries",
+  "Miscellaneous",
+] as const;
+export type CallCategoryTag = (typeof CALL_CATEGORY_TAGS)[number];
 
 export type AnalysisTask = {
   title: string;
@@ -13,7 +20,7 @@ export type AnalysisTask = {
 };
 
 export type AnalysisTag = {
-  tag: string;
+  tag: CallCategoryTag;
   confidence: Confidence;
 };
 
@@ -83,7 +90,7 @@ export const ANALYSIS_OUTPUT_JSON_SCHEMA = {
         additionalProperties: false,
         required: ["tag", "confidence"],
         properties: {
-          tag: { type: "string" },
+          tag: { type: "string", enum: [...CALL_CATEGORY_TAGS] },
           confidence: { type: "number", minimum: 0, maximum: 1 },
         },
       },
@@ -244,9 +251,16 @@ export function validateAnalysisJson(input: unknown): {
     }
     if (!onlyKeys(t, ["tag", "confidence"])) errors.push(`tags[${i}] has unexpected properties`);
     if (typeof t.tag !== "string") errors.push(`tags[${i}].tag must be string`);
+    if (typeof t.tag === "string" && !CALL_CATEGORY_TAGS.includes(t.tag as CallCategoryTag)) {
+      errors.push(`tags[${i}].tag must be one of: ${CALL_CATEGORY_TAGS.join(", ")}`);
+    }
     if (!inRangeConfidence(t.confidence)) errors.push(`tags[${i}].confidence must be 0..1`);
-    if (typeof t.tag === "string" && inRangeConfidence(t.confidence)) {
-      parsedTags.push({ tag: t.tag, confidence: t.confidence });
+    if (
+      typeof t.tag === "string" &&
+      CALL_CATEGORY_TAGS.includes(t.tag as CallCategoryTag) &&
+      inRangeConfidence(t.confidence)
+    ) {
+      parsedTags.push({ tag: t.tag as CallCategoryTag, confidence: t.confidence });
     }
   });
 

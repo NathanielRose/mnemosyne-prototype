@@ -15,6 +15,8 @@ import {
   Star,
   Bell,
   X,
+  Trash2,
+  MoreHorizontal,
 } from "lucide-react";
 
 import {
@@ -173,6 +175,7 @@ type ApiCall = {
   summary: string;
   transcriptPreview: string | null;
   notes?: string | null;
+  status?: string | null;
   requiresAction: boolean;
   tag: string | null;
   rateEur: number | string | null;
@@ -354,11 +357,15 @@ function CallRow({
                   {call.detectedLanguage ? call.detectedLanguage : call.language}
                 </Badge>
                 {outcomeBadge(call.outcome)}
-                {call.tag ? (
-                  <Badge variant="outline" className="rounded-xl">
-                    {call.tag}
-                  </Badge>
-                ) : null}
+                {(call.tag ?? "")
+                  .split(",")
+                  .map((part) => part.trim())
+                  .filter(Boolean)
+                  .map((tag) => (
+                    <Badge key={`${call.id}-${tag}`} variant="outline" className="rounded-xl">
+                      {tag}
+                    </Badge>
+                  ))}
                 {call.requiresAction ? (
                   <Badge className="rounded-xl bg-yellow-100 text-yellow-900 border border-yellow-200">
                     <AlertTriangle className="h-3.5 w-3.5 mr-1" /> Needs action
@@ -623,6 +630,7 @@ function mapApiCall(row: ApiCall): CallRecord {
 
 export default function App() {
   const [calls, setCalls] = useState<CallRecord[]>([]);
+  const [deletedCalls, setDeletedCalls] = useState<CallRecord[]>([]);
   const [selected, setSelected] = useState<CallRecord | null>(null);
   const [query, setQuery] = useState<string>("");
   const [transcriptExpanded, setTranscriptExpanded] = useState<boolean>(false);
@@ -652,6 +660,9 @@ export default function App() {
   const [expandedEvidence, setExpandedEvidence] = useState<Record<string, boolean>>({});
   const [hasMoreCalls, setHasMoreCalls] = useState<boolean>(false);
   const [loadingMoreCalls, setLoadingMoreCalls] = useState<boolean>(false);
+  const [deletingCall, setDeletingCall] = useState<boolean>(false);
+  const [deleteCallError, setDeleteCallError] = useState<string | null>(null);
+  const [detailsMenuOpen, setDetailsMenuOpen] = useState<boolean>(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -659,24 +670,35 @@ export default function App() {
 
     const loadCalls = async () => {
       try {
-        const res = await fetch(`${apiBaseUrl}/calls?limit=${PAGE_SIZE + 1}&offset=0`, {
-          signal: controller.signal,
-        });
+        const [res, deletedRes] = await Promise.all([
+          fetch(`${apiBaseUrl}/calls?limit=${PAGE_SIZE + 1}&offset=0`, {
+            signal: controller.signal,
+          }),
+          fetch(`${apiBaseUrl}/calls/deleted?limit=200&offset=0`, {
+            signal: controller.signal,
+          }),
+        ]);
         if (!res.ok) throw new Error(`Failed to load calls: ${res.status}`);
+        if (!deletedRes.ok) throw new Error(`Failed to load deleted calls: ${deletedRes.status}`);
         const data = (await res.json()) as ApiCall[];
+        const deletedData = (await deletedRes.json()) as ApiCall[];
         if (!Array.isArray(data)) throw new Error("Invalid calls payload");
+        if (!Array.isArray(deletedData)) throw new Error("Invalid deleted calls payload");
 
         const hasMore = data.length > PAGE_SIZE;
         const mapped = data.slice(0, PAGE_SIZE).map(mapApiCall);
+        const deletedMapped = deletedData.map(mapApiCall);
 
         if (!cancelled) {
           setCalls(mapped);
+          setDeletedCalls(deletedMapped);
           setSelected(mapped[0] ?? null);
           setHasMoreCalls(hasMore);
         }
       } catch {
         if (!cancelled) {
           setCalls([]);
+          setDeletedCalls([]);
           setSelected(null);
           setHasMoreCalls(false);
         }
@@ -704,6 +726,8 @@ export default function App() {
     setCallerDraft(selected?.callerName ?? "");
     setCallerEditing(false);
     setCallerError(null);
+    setDeleteCallError(null);
+    setDetailsMenuOpen(false);
     setExpandedEvidence({});
   }, [selected?.id]);
 
@@ -1111,6 +1135,34 @@ export default function App() {
     }
   };
 
+  const handleDeleteSelectedCall = async () => {
+    if (!selected || deletingCall) return;
+    const confirmed = window.confirm(
+      `Move call ${selected.id.slice(-6)} to Deleted calls? You can still view it in the Deleted tab.`
+    );
+    if (!confirmed) return;
+    setDeletingCall(true);
+    setDeleteCallError(null);
+    const deleting = selected;
+    try {
+      const res = await fetch(`${apiBaseUrl}/calls/${encodeURIComponent(deleting.id)}/delete`, {
+        method: "PATCH",
+      });
+      if (!res.ok) throw new Error(`Failed to delete call: ${res.status}`);
+
+      setDeletedCalls((prev) => [deleting, ...prev.filter((c) => c.id !== deleting.id)]);
+      setCalls((prev) => {
+        const remaining = prev.filter((c) => c.id !== deleting.id);
+        setSelected((curr) => (curr?.id === deleting.id ? (remaining[0] ?? null) : curr));
+        return remaining;
+      });
+    } catch {
+      setDeleteCallError("Could not delete call. Please try again.");
+    } finally {
+      setDeletingCall(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-background relative overflow-hidden">
       <div className="mx-auto max-w-7xl p-4 md:p-6 space-y-4">
@@ -1125,7 +1177,7 @@ export default function App() {
                 <div className="flex items-center gap-2">
                   <div className="text-sm font-semibold tracking-widest uppercase font-mono">
                     <span className="bg-gradient-to-r from-fuchsia-500 to-purple-500 bg-clip-text text-transparent font-semibold">
-                      Mnemosyne AI
+                      Μνήμη AI
                     </span>
                   </div>
                   <Badge variant="outline" className="rounded-xl">
@@ -1252,6 +1304,12 @@ export default function App() {
             >
               Insights
             </TabsTrigger>
+            <TabsTrigger
+              value="deleted"
+              className="rounded-2xl data-[state=active]:bg-purple-600 data-[state=active]:text-white data-[state=active]:shadow-sm"
+            >
+              Deleted
+            </TabsTrigger>
           </TabsList>
 
           {/* Timeline */}
@@ -1331,8 +1389,51 @@ export default function App() {
                     <>
                       <div className="flex items-center justify-between">
                         <div className="font-semibold">{selected.when}</div>
-                        {outcomeBadge(selected.outcome)}
+                        <div className="relative flex items-center gap-2">
+                          {outcomeBadge(selected.outcome)}
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8 rounded-xl"
+                            onClick={() => setDetailsMenuOpen((v) => !v)}
+                            aria-label="Call actions"
+                          >
+                            <MoreHorizontal className="h-4 w-4" />
+                          </Button>
+                          {detailsMenuOpen ? (
+                            <div className="absolute right-0 top-9 z-20 min-w-[180px] rounded-xl border border-zinc-200 bg-white p-1 shadow-md">
+                              <button
+                                type="button"
+                                className="w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-zinc-100"
+                                onClick={() => {
+                                  setCallerEditing(true);
+                                  setDetailsMenuOpen(false);
+                                }}
+                              >
+                                Edit call details
+                              </button>
+                              <button
+                                type="button"
+                                className="w-full rounded-lg px-3 py-2 text-left text-sm text-red-600 hover:bg-red-50"
+                                onClick={async () => {
+                                  setDetailsMenuOpen(false);
+                                  await handleDeleteSelectedCall();
+                                }}
+                                disabled={deletingCall}
+                              >
+                                <span className="inline-flex items-center gap-2">
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                  {deletingCall ? "Deleting..." : "Delete call"}
+                                </span>
+                              </button>
+                            </div>
+                          ) : null}
+                        </div>
                       </div>
+                      {deleteCallError ? (
+                        <div className="text-xs text-red-600">{deleteCallError}</div>
+                      ) : null}
 
                       <div className="text-sm text-muted-foreground">
                         From: {selected.from}
@@ -1368,17 +1469,7 @@ export default function App() {
                                 Cancel
                               </Button>
                             </div>
-                          ) : (
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              className="rounded-xl h-8 px-3"
-                              onClick={() => setCallerEditing(true)}
-                            >
-                              Edit
-                            </Button>
-                          )}
+                          ) : null}
                         </div>
                         {callerEditing ? (
                           <Input
@@ -1828,6 +1919,43 @@ export default function App() {
                 </CardContent>
               </Card>
             </div>
+          </TabsContent>
+
+          {/* Deleted */}
+          <TabsContent value="deleted" className="mt-4">
+            <Card className="rounded-2xl shadow-sm">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-lg">Deleted calls ({deletedCalls.length})</CardTitle>
+                <CardDescription>Soft-deleted calls kept for review.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {deletedCalls.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">No deleted calls.</div>
+                ) : (
+                  deletedCalls.map((call) => (
+                    <div
+                      key={`deleted-${call.id}`}
+                      className="rounded-2xl border border-zinc-200 bg-zinc-50/70 p-3 shadow-sm"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="font-medium">{call.when}</div>
+                        <Badge variant="outline" className="rounded-xl">
+                          Deleted
+                        </Badge>
+                      </div>
+                      <div className="mt-1 text-sm text-muted-foreground">
+                        From: {call.from}
+                        {call.to ? ` • Receiver: ${call.to}` : ""}
+                      </div>
+                      <div className="mt-1 text-sm text-muted-foreground">
+                        Caller: {call.callerName?.trim() ? call.callerName : "Unknown"}
+                      </div>
+                      <div className="mt-2 text-sm leading-5">{getSummaryText(call.summary)}</div>
+                    </div>
+                  ))
+                )}
+              </CardContent>
+            </Card>
           </TabsContent>
 
           {/* To Do */}
