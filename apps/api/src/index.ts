@@ -229,6 +229,30 @@ app.get("/calls", async (request, reply) => {
       .limit(safeLimit)
       .offset(safeOffset);
 
+    const callIds = rows.map((r) => r.call.id);
+    const topTagRows = callIds.length
+      ? await db
+          .select({
+            callId: callTagsSuggested.callId,
+            tag: callTagsSuggested.tag,
+            state: callTagsSuggested.state,
+          })
+          .from(callTagsSuggested)
+          .where(
+            and(
+              inArray(callTagsSuggested.callId, callIds),
+              eq(callTagsSuggested.tier, "top"),
+              eq(callTagsSuggested.state, "confirmed")
+            )
+          )
+      : [];
+    const topTagsByCall = new Map<string, string[]>();
+    for (const row of topTagRows) {
+      const list = topTagsByCall.get(row.callId) ?? [];
+      if (!list.includes(row.tag)) list.push(row.tag);
+      topTagsByCall.set(row.callId, list);
+    }
+
     const shaped = rows.map((r) => {
       const transcriptOriginal =
         typeof r.transcriptOriginal === "string" && r.transcriptOriginal.trim().length
@@ -253,6 +277,7 @@ app.get("/calls", async (request, reply) => {
         transcriptEnglish,
         transcriptPreviewOriginal,
         transcriptPreviewEn,
+        topLevelTags: topTagsByCall.get(r.call.id) ?? [],
       };
     });
 
@@ -364,10 +389,17 @@ app.get("/calls/:externalId/analysis", async (request, reply) => {
         .select({
           id: callTagsSuggested.id,
           tag: callTagsSuggested.tag,
+          tier: callTagsSuggested.tier,
+          state: callTagsSuggested.state,
           confidence: callTagsSuggested.confidence,
         })
         .from(callTagsSuggested)
-        .where(and(eq(callTagsSuggested.callId, callRow.id), eq(callTagsSuggested.state, "suggested"))),
+        .where(
+          and(
+            eq(callTagsSuggested.callId, callRow.id),
+            inArray(callTagsSuggested.state, ["suggested", "confirmed"])
+          )
+        ),
       db
         .select({
           id: callParticipantsSuggested.id,
@@ -413,11 +445,15 @@ app.get("/calls/:externalId/analysis", async (request, reply) => {
           evidenceQuotes: Array.isArray(t.evidenceQuotes) ? t.evidenceQuotes : [],
           confidence: toNumberOrNull(t.confidence),
         })),
-        tags: tags.map((t) => ({
-          id: t.id,
-          tag: t.tag,
-          confidence: toNumberOrNull(t.confidence),
-        })),
+        topLevelTags: tags
+          .filter((t) => t.tier === "top" && t.state === "confirmed")
+          .map((t) => ({ id: t.id, tag: t.tag, confidence: toNumberOrNull(t.confidence) })),
+        topLevelTagsSuggested: tags
+          .filter((t) => t.tier === "top" && t.state === "suggested")
+          .map((t) => ({ id: t.id, tag: t.tag, confidence: toNumberOrNull(t.confidence) })),
+        detailTagsSuggested: tags
+          .filter((t) => t.tier === "detail" && t.state === "suggested")
+          .map((t) => ({ id: t.id, tag: t.tag, confidence: toNumberOrNull(t.confidence) })),
         participants: participants.map((p) => ({
           id: p.id,
           name: p.name,
@@ -494,7 +530,7 @@ app.post("/calls/:externalId/analysis/accept", async (request, reply) => {
     let acceptedTaskCount = 0;
     let acceptedTagCount = 0;
     let acceptedParticipantCount = 0;
-    let acceptedTags: Array<{ tag: string; confidence: unknown }> = [];
+    let acceptedTags: Array<{ tag: string; tier: string; confidence: unknown }> = [];
     let acceptedParticipants: Array<{ name: string | null; confidence: unknown }> = [];
 
     await db.transaction(async (tx) => {
@@ -527,11 +563,13 @@ app.post("/calls/:externalId/analysis/accept", async (request, reply) => {
           .returning({
             id: callTagsSuggested.id,
             tag: callTagsSuggested.tag,
+            tier: callTagsSuggested.tier,
             confidence: callTagsSuggested.confidence,
           });
         acceptedTagCount = accepted.length;
         acceptedTags = accepted.map((item) => ({
           tag: item.tag,
+          tier: item.tier,
           confidence: item.confidence,
         }));
       }
@@ -575,8 +613,9 @@ app.post("/calls/:externalId/analysis/accept", async (request, reply) => {
         if (acceptSummaryDetailed) callUpdate.summarySuggestedDetailed = null;
       }
 
-      if (acceptedTags.length) {
-        const sorted = [...acceptedTags].sort(
+      const acceptedTopLevelTags = acceptedTags.filter((t) => t.tier === "top");
+      if (acceptedTopLevelTags.length) {
+        const sorted = [...acceptedTopLevelTags].sort(
           (a, b) => (toNumberOrNull(b.confidence) ?? 0) - (toNumberOrNull(a.confidence) ?? 0)
         );
         const unique = Array.from(

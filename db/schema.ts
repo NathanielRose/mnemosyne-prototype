@@ -245,6 +245,7 @@ export const callTagsSuggested = pgTable("call_tags_suggested", {
     .notNull()
     .references(() => calls.id, { onDelete: "cascade" }),
   state: text("state").notNull().default("suggested"),
+  tier: text("tier").notNull().default("detail"),
   tag: text("tag").notNull(),
   confidence: numeric("confidence", { precision: 4, scale: 3 }).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

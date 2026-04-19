@@ -59,10 +59,27 @@ export function postProcess(output: AnalysisOutput, input: PostProcessInput): An
     tags.push({ tag: "Miscellaneous", confidence: 0.55 });
   }
 
+  // Dedup detail_tags by case-insensitive key, keep max confidence, cap at 6.
+  const detailMap = new Map<string, { display: string; confidence: number }>();
+  (output.detail_tags ?? []).forEach((d) => {
+    const display = (d.tag || "").trim();
+    if (!display) return;
+    const key = display.toLowerCase();
+    const prev = detailMap.get(key);
+    if (!prev || d.confidence > prev.confidence) {
+      detailMap.set(key, { display, confidence: d.confidence });
+    }
+  });
+  const detail_tags: AnalysisOutput["detail_tags"] = Array.from(detailMap.values())
+    .sort((a, b) => b.confidence - a.confidence)
+    .slice(0, 6)
+    .map(({ display, confidence }) => ({ tag: display, confidence }));
+
   return {
     ...output,
     tasks,
     tags,
+    detail_tags,
     participants,
   };
 }

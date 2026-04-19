@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Phone,
   Clock,
@@ -97,8 +97,14 @@ const formatWhen = (iso: string) => {
   if (d >= startOfToday) return `Today ${time}`;
   if (d >= startOfYesterday) return `Yesterday ${time}`;
 
-  const weekday = d.toLocaleDateString(undefined, { weekday: "short" });
-  return `${weekday} ${time}`;
+  const startOfPastWeek = new Date(startOfToday);
+  startOfPastWeek.setDate(startOfPastWeek.getDate() - 6);
+  if (d >= startOfPastWeek) {
+    const weekday = d.toLocaleDateString(undefined, { weekday: "short" });
+    return `${weekday} ${time}`;
+  }
+
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 };
 
 const hasNonEmptyText = (value?: string | null) =>
@@ -153,6 +159,7 @@ type CallRecord = {
   // Optional extras (POC)
   tag?: string; // e.g., "Wedding"
   rateEUR?: number; // show for booked calls
+  topLevelTags?: TopLevelTag[];
 };
 
 type ApiCall = {
@@ -179,6 +186,7 @@ type ApiCall = {
   requiresAction: boolean;
   tag: string | null;
   rateEur: number | string | null;
+  topLevelTags?: string[];
 };
 
 type ConfirmedTask = {
@@ -240,7 +248,12 @@ type CallAnalysis = {
     notes?: string | null;
   } | null;
   tasks: SuggestedTask[];
-  tags: SuggestedTag[];
+  // Confirmed top-level category chips (Reservations / Special Requests / Inquiries / Miscellaneous).
+  topLevelTags: SuggestedTag[];
+  // Top-level categories still pending user acceptance (below auto-apply threshold).
+  topLevelTagsSuggested: SuggestedTag[];
+  // Free-form detail tags for the suggested panel.
+  detailTagsSuggested: SuggestedTag[];
   participants: SuggestedParticipant[];
 };
 
@@ -275,11 +288,66 @@ const outcomeBadge = (outcome: CallOutcome) => {
   return <Badge variant={m.variant}>{m.label}</Badge>;
 };
 
-const priorityPill = (p: CallRecord["priority"]) => {
-  if (p === "High") return <Badge variant="destructive">High</Badge>;
-  if (p === "Medium") return <Badge variant="secondary">Medium</Badge>;
-  return <Badge variant="outline">Low</Badge>;
+const TOP_LEVEL_TAGS = [
+  "Reservations",
+  "Special Requests",
+  "Inquiries",
+  "Miscellaneous",
+] as const;
+type TopLevelTag = (typeof TOP_LEVEL_TAGS)[number];
+
+const topLevelTagClass: Record<TopLevelTag, string> = {
+  Reservations: "rounded-xl bg-emerald-100 text-emerald-900 border border-emerald-200",
+  "Special Requests": "rounded-xl bg-sky-100 text-sky-900 border border-sky-200",
+  Inquiries: "rounded-xl bg-purple-100 text-purple-900 border border-purple-200",
+  Miscellaneous: "rounded-xl bg-slate-100 text-slate-700 border border-slate-200",
 };
+
+const isTopLevelTag = (value: unknown): value is TopLevelTag =>
+  typeof value === "string" && (TOP_LEVEL_TAGS as readonly string[]).includes(value);
+
+const AVATAR_GRADIENTS = [
+  "bg-gradient-to-br from-indigo-100 to-indigo-200 text-indigo-700",
+  "bg-gradient-to-br from-violet-100 to-violet-200 text-violet-700",
+  "bg-gradient-to-br from-emerald-100 to-emerald-200 text-emerald-700",
+  "bg-gradient-to-br from-blue-100 to-blue-200 text-blue-700",
+];
+
+function avatarFor(call: { id: string; callerName?: string }) {
+  const name = (call.callerName ?? "").trim();
+  let label: string;
+  if (!name) {
+    label = "?";
+  } else {
+    const parts = name.split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) {
+      label = (parts[0]![0]! + parts[1]![0]!).toUpperCase();
+    } else if (parts[0]) {
+      label = parts[0].slice(0, 2).toUpperCase();
+    } else {
+      label = "?";
+    }
+  }
+  const h = call.id.split("").reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
+  const cls = AVATAR_GRADIENTS[h % AVATAR_GRADIENTS.length];
+  return { label, cls };
+}
+
+// Bolds date-range, currency, and room-type phrases in the feed summary.
+// Keep the regex conservative — worth surfacing at a glance, not every noun.
+const SUMMARY_HIGHLIGHT_RE =
+  /(€\s?\d+(?:\s?[-–]\s?\d+)?(?:\s*\/\s*night)?|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s*\d+(?:\s*[-–]\s*(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s*)?\d+)?|\b(?:Single|Double|Triple|Suite)\s+room\b)/gi;
+
+function escapeHtml(s: string) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function highlightSummary(text: string): string {
+  return escapeHtml(text).replace(
+    SUMMARY_HIGHLIGHT_RE,
+    (m) => `<b class="font-semibold text-indigo-700">${m}</b>`
+  );
+}
 
 const weekSeries = [
   { day: "Mon", calls: 5, avgSec: 210 },
@@ -298,27 +366,83 @@ const outcomes = [
   { name: "No answer", value: 6 },
 ];
 
+type StatTone = "indigo" | "violet" | "amber" | "green";
+type StatTrend = { tone: "up" | "warn" | "flat"; value?: string; label: string };
+
+const STAT_TONE: Record<StatTone, { iconBg: string; iconFg: string; sparkStroke: string }> = {
+  indigo: { iconBg: "bg-indigo-50", iconFg: "text-indigo-600", sparkStroke: "url(#spark-indigo)" },
+  violet: { iconBg: "bg-violet-50", iconFg: "text-violet-600", sparkStroke: "#8B5CF6" },
+  amber: { iconBg: "bg-amber-50", iconFg: "text-amber-700", sparkStroke: "#F59E0B" },
+  green: { iconBg: "bg-emerald-50", iconFg: "text-emerald-700", sparkStroke: "#10B981" },
+};
+
 function Stat({
   label,
   value,
+  unit,
   icon: Icon,
+  tone = "indigo",
+  trend,
+  sparkPath,
 }: {
   label: string;
   value: string;
+  unit?: string;
   icon: any;
+  tone?: StatTone;
+  trend?: StatTrend;
+  sparkPath?: string;
 }) {
+  const toneCfg = STAT_TONE[tone];
+  const trendClass =
+    trend?.tone === "up"
+      ? "text-emerald-600 font-medium"
+      : trend?.tone === "warn"
+      ? "text-amber-600 font-medium"
+      : "text-muted-foreground";
+  const trendGlyph = trend?.tone === "up" ? "↗" : trend?.tone === "warn" ? "●" : "—";
   return (
-    <Card className="rounded-2xl shadow-sm">
-      <CardContent className="p-4">
+    <Card className="relative overflow-hidden rounded-2xl shadow-sm hover:shadow-md transition">
+      <CardContent className="p-5">
         <div className="flex items-center justify-between">
-          <div>
-            <div className="text-sm text-muted-foreground">{label}</div>
-            <div className="mt-1 text-2xl font-semibold">{value}</div>
-          </div>
-          <div className="h-10 w-10 rounded-2xl border flex items-center justify-center">
-            <Icon className="h-5 w-5" />
+          <div className="text-sm font-medium text-muted-foreground">{label}</div>
+          <div className={`h-8 w-8 rounded-lg flex items-center justify-center ${toneCfg.iconBg} ${toneCfg.iconFg}`}>
+            <Icon className="h-4 w-4" />
           </div>
         </div>
+        <div className="mt-4 flex items-baseline gap-2">
+          <div className="text-4xl font-semibold tracking-tight tabular-nums">{value}</div>
+          {unit ? <div className="text-sm text-muted-foreground">{unit}</div> : null}
+        </div>
+        {trend ? (
+          <div className="mt-2 text-xs font-mono flex items-center gap-1.5">
+            {trend.value ? (
+              <span className={trendClass}>
+                {trendGlyph} {trend.value}
+              </span>
+            ) : (
+              <span className={trendClass}>{trendGlyph}</span>
+            )}
+            <span className="text-muted-foreground">{trend.label}</span>
+          </div>
+        ) : null}
+        {sparkPath ? (
+          <svg
+            className="absolute right-0 bottom-0 opacity-30 pointer-events-none"
+            width="110"
+            height="44"
+            viewBox="0 0 110 44"
+            fill="none"
+          >
+            <defs>
+              <linearGradient id="spark-indigo" x1="0" x2="110">
+                <stop stopColor="#6366F1" />
+                <stop offset="1" stopColor="#8B5CF6" />
+              </linearGradient>
+            </defs>
+            <path d={sparkPath} stroke={toneCfg.sparkStroke} strokeWidth={1.8} fill="none" />
+          </svg>
+        ) : null}
       </CardContent>
     </Card>
   );
@@ -335,270 +459,126 @@ function CallRow({
 }) {
   const hasSummary = hasNonEmptyText(call.summary);
   const summaryText = getSummaryText(call.summary);
+  const avatar = avatarFor(call);
+  const lang = call.detectedLanguage ? call.detectedLanguage : call.language;
+  const langCode = lang?.slice(0, 2).toUpperCase();
+
   return (
     <button
       className="w-full text-left"
       onClick={() => onSelect(call)}
       aria-label={`Open call ${call.id}`}
     >
-      <Card
-        className={
-          isSelected
-            ? "rounded-2xl bg-purple-50 shadow hover:shadow-md transition border-purple-200"
-            : "rounded-2xl bg-muted/25 shadow hover:shadow-md transition border-muted/60"
-        }
+      <div
+        className={[
+          "grid grid-cols-[44px_1fr_auto] gap-4 px-5 py-4 border-b border-zinc-100 transition",
+          isSelected ? "row-selected" : "hover:bg-zinc-50/70",
+        ].join(" ")}
       >
-        <CardContent className="p-4">
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 flex-wrap">
-                <div className="font-semibold">{call.when}</div>
-                <Badge variant="outline" className="rounded-xl">
-                  {call.detectedLanguage ? call.detectedLanguage : call.language}
-                </Badge>
-                {outcomeBadge(call.outcome)}
-                {(call.tag ?? "")
-                  .split(",")
-                  .map((part) => part.trim())
-                  .filter(Boolean)
-                  .map((tag) => (
-                    <Badge key={`${call.id}-${tag}`} variant="outline" className="rounded-xl">
-                      {tag}
-                    </Badge>
-                  ))}
-                {call.requiresAction ? (
-                  <Badge className="rounded-xl bg-yellow-100 text-yellow-900 border border-yellow-200">
-                    <AlertTriangle className="h-3.5 w-3.5 mr-1" /> Needs action
-                  </Badge>
-                ) : (
-                  <Badge variant="outline" className="rounded-xl">
-                    <CheckCircle2 className="h-3.5 w-3.5 mr-1" /> Clean
-                  </Badge>
-                )}
-              </div>
+        <div
+          className={[
+            "h-[42px] w-[42px] rounded-full border border-zinc-200 grid place-items-center text-sm font-semibold",
+            avatar.cls,
+          ].join(" ")}
+        >
+          {avatar.label}
+        </div>
 
-              <div className="mt-2 text-sm text-muted-foreground truncate flex items-center gap-1">
-                <Phone className="h-4 w-4 shrink-0" /> From: {call.from}
-              </div>
-              <div className="mt-1 text-sm text-muted-foreground truncate">
-                Caller: {call.callerName?.trim() ? call.callerName : "Unknown"}
-              </div>
-
-              <div
-                className={[
-                  "mt-2 text-sm leading-5 line-clamp-2",
-                  hasSummary ? "" : "text-muted-foreground italic",
-                ].join(" ")}
-              >
-                {summaryText}
-              </div>
-            </div>
-
-            <div className="flex flex-col items-end gap-2 shrink-0">
-              {call.outcome === "Booked" && typeof call.rateEUR === "number" ? (
-                <Badge variant="outline" className="rounded-xl">
-                  €{call.rateEUR}/night
-                </Badge>
-              ) : null}
-              {priorityPill(call.priority)}
-              <div className="flex items-center gap-1 text-sm text-muted-foreground">
-                <Clock className="h-4 w-4" /> {formatSecs(call.durationSec)}
-              </div>
-              <div className="text-sm text-muted-foreground" title={call.id}>
-                SID:{call.id.slice(-6)}
-              </div>
-            </div>
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 mb-1.5">
+            <span className="text-sm font-semibold">{call.when}</span>
+            <span className="h-[3px] w-[3px] rounded-full bg-zinc-400" />
+            <span className="font-mono text-xs text-muted-foreground truncate">{call.from}</span>
           </div>
-        </CardContent>
-      </Card>
+
+          <div className="flex flex-wrap gap-1.5 mb-2">
+            {(call.topLevelTags ?? []).map((t) => (
+              <span key={`${call.id}-top-${t}`} className={`${topLevelTagClass[t]} text-[11px] px-2.5 py-0.5`}>
+                {t}
+              </span>
+            ))}
+            {lang ? (
+              <span className="inline-flex items-center rounded-full text-[11px] px-2.5 py-0.5 bg-zinc-100 text-zinc-600 border border-zinc-200">
+                {langCode} · {lang}
+              </span>
+            ) : null}
+            {call.requiresAction ? (
+              <span className="inline-flex items-center gap-1 rounded-full text-[11px] px-2.5 py-0.5 bg-amber-50 text-amber-800 border border-amber-200">
+                <span className="h-[5px] w-[5px] rounded-full bg-current" />
+                Needs action
+              </span>
+            ) : null}
+          </div>
+
+          <div
+            className={[
+              "text-sm leading-5 line-clamp-2 max-w-xl",
+              hasSummary ? "" : "text-muted-foreground italic",
+            ].join(" ")}
+            {...(hasSummary
+              ? { dangerouslySetInnerHTML: { __html: highlightSummary(summaryText) } }
+              : { children: summaryText })}
+          />
+        </div>
+
+        <div className="flex flex-col items-end gap-1.5 min-w-[92px]">
+          {call.outcome === "Booked" && typeof call.rateEUR === "number" ? (
+            <div className="text-lg font-semibold tracking-tight text-indigo-700 tabular-nums">
+              €{call.rateEUR}
+              <span className="ml-0.5 text-[11px] font-normal text-muted-foreground">/ night</span>
+            </div>
+          ) : null}
+          <PriorityPill priority={call.priority} />
+          <div className="flex items-center gap-1 font-mono text-xs text-muted-foreground">
+            <Clock className="h-3 w-3" /> {formatSecs(call.durationSec)}
+          </div>
+          <div className="font-mono text-[10px] text-zinc-400" title={call.id}>
+            SID · {call.id.slice(-6)}
+          </div>
+        </div>
+      </div>
     </button>
   );
 }
 
-function BookingWorkflow({
-  call,
-  onSave,
+function DetailField({
+  label,
+  children,
+  action,
 }: {
-  call: CallRecord;
-  onSave: (draft: ReservationDraft) => void;
+  label: string;
+  children: ReactNode;
+  action?: ReactNode;
 }) {
-  const initial: ReservationDraft = {
-    guestName: call.extracted?.guestName || "",
-    phone: call.from || "",
-    email: "",
-    checkIn: call.extracted?.checkIn || "",
-    checkOut: call.extracted?.checkOut || "",
-    adults:
-      typeof call.extracted?.adults === "number" ? call.extracted!.adults! : 2,
-    children:
-      typeof call.extracted?.children === "number" ? call.extracted!.children! : 0,
-    roomType: (call.extracted?.roomType as any) || "Double",
-    rateType: (call.extracted?.rateType as any) || "Standard",
-    notes: call.extracted?.notes || "",
-    status: (call.extracted?.status as any) || "Draft",
-  };
-
-  const [draft, setDraft] = useState<ReservationDraft>(initial);
-
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between gap-2">
-        <div>
-          <div className="text-sm text-muted-foreground">Reservation workflow</div>
-          <div className="text-lg font-semibold flex items-center gap-2">
-            <CalendarCheck className="h-5 w-5" /> ARXONTIKO Hotel & Restaurant
-          </div>
+    <div className="min-w-0">
+      <div className="flex items-center justify-between mb-1">
+        <div className="text-[11px] font-mono font-semibold uppercase tracking-wider text-muted-foreground">
+          {label}
         </div>
-        <Badge variant="outline" className="rounded-xl">
-          From call {call.id}
-        </Badge>
+        {action}
       </div>
-
-      <Separator />
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="space-y-2">
-          <Label>Guest name</Label>
-          <Input
-            value={draft.guestName}
-            onChange={(e) => setDraft((d) => ({ ...d, guestName: e.target.value }))}
-            placeholder="e.g., Maria Papadopoulou"
-          />
-        </div>
-        <div className="space-y-2">
-          <Label>Phone</Label>
-          <Input
-            value={draft.phone}
-            onChange={(e) => setDraft((d) => ({ ...d, phone: e.target.value }))}
-          />
-        </div>
-        <div className="space-y-2 md:col-span-2">
-          <Label>Email</Label>
-          <Input
-            value={draft.email}
-            onChange={(e) => setDraft((d) => ({ ...d, email: e.target.value }))}
-            placeholder="optional"
-          />
-        </div>
-
-        <div className="space-y-2">
-          <Label>Check-in</Label>
-          <Input
-            type="date"
-            value={draft.checkIn}
-            onChange={(e) => setDraft((d) => ({ ...d, checkIn: e.target.value }))}
-          />
-        </div>
-        <div className="space-y-2">
-          <Label>Check-out</Label>
-          <Input
-            type="date"
-            value={draft.checkOut}
-            onChange={(e) => setDraft((d) => ({ ...d, checkOut: e.target.value }))}
-          />
-        </div>
-
-        <div className="space-y-2">
-          <Label>Adults</Label>
-          <Input
-            type="number"
-            min={1}
-            value={draft.adults}
-            onChange={(e) => setDraft((d) => ({ ...d, adults: Number(e.target.value) }))}
-          />
-        </div>
-        <div className="space-y-2">
-          <Label>Children</Label>
-          <Input
-            type="number"
-            min={0}
-            value={draft.children}
-            onChange={(e) => setDraft((d) => ({ ...d, children: Number(e.target.value) }))}
-          />
-        </div>
-
-        <div className="space-y-2">
-          <Label>Room type</Label>
-          <Select
-            value={draft.roomType}
-            onValueChange={(v: any) => setDraft((d) => ({ ...d, roomType: v }))}
-          >
-            <SelectTrigger>
-              <SelectValue placeholder="Select room type" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="Single">Single</SelectItem>
-              <SelectItem value="Double">Double</SelectItem>
-              <SelectItem value="Triple">Triple</SelectItem>
-              <SelectItem value="Suite">Suite</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-
-        <div className="space-y-2">
-          <Label>Rate type</Label>
-          <Select
-            value={draft.rateType}
-            onValueChange={(v: any) => setDraft((d) => ({ ...d, rateType: v }))}
-          >
-            <SelectTrigger>
-              <SelectValue placeholder="Select rate" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="Standard">Standard</SelectItem>
-              <SelectItem value="Non-refundable">Non-refundable</SelectItem>
-              <SelectItem value="Half-board">Half-board</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-
-        <div className="space-y-2 md:col-span-2">
-          <Label>Notes</Label>
-          <Textarea
-            value={draft.notes}
-            onChange={(e) => setDraft((d) => ({ ...d, notes: e.target.value }))}
-            placeholder="Parking, late check-in, dietary needs, etc."
-            className="min-h-[96px]"
-          />
-        </div>
-
-        <div className="space-y-2 md:col-span-2">
-          <Label>Status</Label>
-          <Select
-            value={draft.status}
-            onValueChange={(v: any) => setDraft((d) => ({ ...d, status: v }))}
-          >
-            <SelectTrigger>
-              <SelectValue placeholder="Select status" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="Draft">Draft</SelectItem>
-              <SelectItem value="Pending confirmation">Pending confirmation</SelectItem>
-              <SelectItem value="Confirmed">Confirmed</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
-
-      <div className="flex items-center justify-between gap-2">
-        <Button
-          variant="outline"
-          onClick={() => navigator.clipboard?.writeText(JSON.stringify(draft, null, 2))}
-        >
-          <Download className="h-4 w-4 mr-2" /> Copy JSON
-        </Button>
-        <Button onClick={() => onSave(draft)}>
-          <ChevronRight className="h-4 w-4 mr-2" /> Save reservation
-        </Button>
-      </div>
-
-      <p className="text-xs text-muted-foreground">
-        POC note: this does not charge cards or finalize bookings. Keep payment out of
-        transcripts.
-      </p>
+      <div className="text-sm">{children}</div>
     </div>
   );
 }
+
+function PriorityPill({ priority }: { priority: CallRecord["priority"] }) {
+  const map: Record<CallRecord["priority"], string> = {
+    High: "bg-red-50 text-red-700 border-red-200",
+    Medium: "bg-amber-50 text-amber-800 border-amber-200",
+    Low: "bg-zinc-50 text-zinc-600 border-zinc-200",
+  };
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-full border text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 ${map[priority]}`}
+    >
+      <span className="h-[5px] w-[5px] rounded-full bg-current" />
+      {priority}
+    </span>
+  );
+}
+
 
 function mapApiCall(row: ApiCall): CallRecord {
   const rate = row.rateEur !== null ? Number(row.rateEur) : undefined;
@@ -625,6 +605,9 @@ function mapApiCall(row: ApiCall): CallRecord {
     requiresAction: row.requiresAction,
     tag: row.tag ?? undefined,
     rateEUR: Number.isFinite(rate) ? rate : undefined,
+    topLevelTags: Array.isArray(row.topLevelTags)
+      ? row.topLevelTags.filter(isTopLevelTag)
+      : undefined,
   };
 }
 
@@ -866,7 +849,8 @@ export default function App() {
     (selectedAnalysis.summaryShort ?? "").trim().length > 0 ||
     (selectedAnalysis.summaryDetailed ?? "").trim().length > 0 ||
     selectedAnalysis.tasks.length > 0 ||
-    selectedAnalysis.tags.length > 0 ||
+    selectedAnalysis.topLevelTagsSuggested.length > 0 ||
+    selectedAnalysis.detailTagsSuggested.length > 0 ||
     selectedAnalysis.participants.length > 0
   );
   const persistedNotes = (selected?.notes ?? "").trim();
@@ -877,33 +861,6 @@ export default function App() {
     notesEditing &&
     hasNoteChanges &&
     (draftNotes.length > 0 || persistedNotes.length > 0);
-
-  const handleSaveReservation = (draft: ReservationDraft) => {
-    if (!selected) return;
-    setCalls((prev) =>
-      prev.map((c) =>
-        c.id === selected.id
-          ? {
-              ...c,
-              outcome: draft.status === "Confirmed" ? "Booked" : c.outcome,
-              requiresAction: draft.status === "Confirmed" ? false : true,
-              extracted: {
-                ...c.extracted,
-                guestName: draft.guestName || c.extracted?.guestName,
-                checkIn: draft.checkIn,
-                checkOut: draft.checkOut,
-                adults: draft.adults,
-                children: draft.children,
-                roomType: draft.roomType,
-                rateType: draft.rateType,
-                status: draft.status,
-                notes: draft.notes,
-              },
-            }
-          : c
-      )
-    );
-  };
 
   const handleSaveNotes = async () => {
     if (!selected || notesSaving) return;
@@ -1177,7 +1134,7 @@ export default function App() {
                 <div className="flex items-center gap-2">
                   <div className="text-sm font-semibold tracking-widest uppercase font-mono">
                     <span className="bg-gradient-to-r from-fuchsia-500 to-purple-500 bg-clip-text text-transparent font-semibold">
-                      Μνήμη AI
+                      Μneemi AI
                     </span>
                   </div>
                   <Badge variant="outline" className="rounded-xl">
@@ -1217,7 +1174,7 @@ export default function App() {
                       ⌘ K
                     </Badge>
                   )}
-                  <Button size="sm" className="rounded-full">
+                  <Button size="sm" className="rounded-full bg-brand-gradient hover:opacity-90 text-white border-0">
                     <Search className="h-4 w-4 mr-2" /> Search
                   </Button>
                 </div>
@@ -1270,61 +1227,121 @@ export default function App() {
 
         {/* Stats */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          <Stat label="Calls this week" value={`${callsThisWeek}`} icon={Phone} />
-          <Stat label="Avg call length" value={`${formatSecs(avgLen)}`} icon={Clock} />
+          <Stat
+            label="Calls this week"
+            value={`${callsThisWeek}`}
+            unit="calls"
+            icon={Phone}
+            tone="indigo"
+            trend={{ tone: "up", value: "+18%", label: "vs. last week" }}
+            sparkPath="M0 30 L15 28 L30 32 L45 22 L60 25 L75 15 L90 18 L110 8"
+          />
+          <Stat
+            label="Avg call length"
+            value={`${formatSecs(avgLen)}`}
+            unit="min"
+            icon={Clock}
+            tone="violet"
+            trend={{ tone: "flat", label: "stable week-over-week" }}
+            sparkPath="M0 22 L15 24 L30 20 L45 23 L60 21 L75 22 L90 20 L110 22"
+          />
           <Stat
             label="Needs action"
             value={`${calls.filter((c) => c.requiresAction).length}`}
+            unit="open"
             icon={ListTodo}
+            tone="amber"
+            trend={{ tone: "warn", label: "follow-up within 4 h" }}
           />
           <Stat
             label="Bookings (sample)"
             value={`${calls.filter((c) => c.outcome === "Booked").length}`}
+            unit="sample"
             icon={CalendarCheck}
+            tone="green"
+            trend={{ tone: "up", value: "€540", label: "booked value" }}
           />
         </div>
 
         <Tabs defaultValue="timeline" className="w-full">
-          <TabsList className="rounded-2xl bg-purple-50">
-            <TabsTrigger
-              value="timeline"
-              className="rounded-2xl data-[state=active]:bg-purple-600 data-[state=active]:text-white data-[state=active]:shadow-sm"
-            >
-              Timeline
-            </TabsTrigger>
-            <TabsTrigger
-              value="todo"
-              className="rounded-2xl data-[state=active]:bg-purple-600 data-[state=active]:text-white data-[state=active]:shadow-sm"
-            >
-              To do
-            </TabsTrigger>
-            <TabsTrigger
-              value="insights"
-              className="rounded-2xl data-[state=active]:bg-purple-600 data-[state=active]:text-white data-[state=active]:shadow-sm"
-            >
-              Insights
-            </TabsTrigger>
-            <TabsTrigger
-              value="deleted"
-              className="rounded-2xl data-[state=active]:bg-purple-600 data-[state=active]:text-white data-[state=active]:shadow-sm"
-            >
-              Deleted
-            </TabsTrigger>
-          </TabsList>
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <TabsList className="rounded-2xl bg-white border border-zinc-200 p-1 shadow-sm">
+              <TabsTrigger
+                value="timeline"
+                className="rounded-xl gap-2 data-[state=active]:bg-brand-gradient data-[state=active]:text-white data-[state=active]:shadow-sm"
+              >
+                Timeline
+                <span className="rounded px-1.5 py-0.5 text-[10px] font-mono bg-zinc-100 text-zinc-500 data-[state=active]:bg-white/25 data-[state=active]:text-white">
+                  {calls.length}
+                </span>
+              </TabsTrigger>
+              <TabsTrigger
+                value="todo"
+                className="rounded-xl gap-2 data-[state=active]:bg-brand-gradient data-[state=active]:text-white data-[state=active]:shadow-sm"
+              >
+                To do
+                <span className="rounded px-1.5 py-0.5 text-[10px] font-mono bg-zinc-100 text-zinc-500">
+                  {calls.filter((c) => c.requiresAction).length}
+                </span>
+              </TabsTrigger>
+              <TabsTrigger
+                value="insights"
+                className="rounded-xl data-[state=active]:bg-brand-gradient data-[state=active]:text-white data-[state=active]:shadow-sm"
+              >
+                Insights
+              </TabsTrigger>
+              <TabsTrigger
+                value="deleted"
+                className="rounded-xl gap-2 data-[state=active]:bg-brand-gradient data-[state=active]:text-white data-[state=active]:shadow-sm"
+              >
+                Deleted
+                {deletedCalls.length > 0 ? (
+                  <span className="rounded px-1.5 py-0.5 text-[10px] font-mono bg-zinc-100 text-zinc-500">
+                    {deletedCalls.length}
+                  </span>
+                ) : null}
+              </TabsTrigger>
+            </TabsList>
+
+            {/* Filter pills — placeholder UI, not yet wired to query params. */}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm bg-indigo-50 border border-indigo-200 text-indigo-700 shadow-sm"
+              >
+                <CalendarCheck className="h-3.5 w-3.5" />
+                Last 7 days
+              </button>
+              <button
+                type="button"
+                className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm bg-white border border-zinc-200 text-zinc-600 shadow-sm hover:border-zinc-300"
+              >
+                All languages
+              </button>
+              <button
+                type="button"
+                className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm bg-white border border-zinc-200 text-zinc-600 shadow-sm hover:border-zinc-300"
+              >
+                All priorities
+              </button>
+            </div>
+          </div>
 
           {/* Timeline */}
           <TabsContent value="timeline" className="mt-4">
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-              <Card className="rounded-2xl shadow-sm lg:col-span-2">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-lg">
-                    Last calls ({last6.length})
-                  </CardTitle>
-                  <CardDescription>Click a call to view details.</CardDescription>
+              <Card className="rounded-2xl shadow-sm lg:col-span-2 overflow-hidden">
+                <CardHeader className="pb-3 flex-row items-baseline justify-between gap-2">
+                  <div>
+                    <CardTitle className="text-lg">
+                      Recent calls <span className="text-muted-foreground font-normal">— {last6.length} of {calls.length}</span>
+                    </CardTitle>
+                  </div>
+                  <span className="text-xs text-muted-foreground">Click a row for full transcript →</span>
                 </CardHeader>
-                <CardContent className="space-y-3">
+                <CardContent className="p-0 [&>button:last-child>div]:border-b-0">
                   {last6.length === 0 ? (
-                    <div className="text-sm text-muted-foreground">
+                    <div className="p-6 text-sm text-muted-foreground">
                       No calls captured yet.
                     </div>
                   ) : (
@@ -1339,7 +1356,7 @@ export default function App() {
                       ))}
 
                       {hasMoreCalls && (
-                        <div className="pt-1">
+                        <div className="p-4">
                           <Button
                             className="w-full rounded-2xl"
                             variant="outline"
@@ -1388,9 +1405,15 @@ export default function App() {
                   ) : (
                     <>
                       <div className="flex items-center justify-between">
-                        <div className="font-semibold">{selected.when}</div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <div className="font-semibold">{selected.when}</div>
+                          {(selected.topLevelTags ?? []).map((t) => (
+                            <Badge key={`detail-top-${t}`} className={topLevelTagClass[t]}>
+                              {t}
+                            </Badge>
+                          ))}
+                        </div>
                         <div className="relative flex items-center gap-2">
-                          {outcomeBadge(selected.outcome)}
                           <Button
                             type="button"
                             size="icon"
@@ -1435,78 +1458,102 @@ export default function App() {
                         <div className="text-xs text-red-600">{deleteCallError}</div>
                       ) : null}
 
-                      <div className="text-sm text-muted-foreground">
-                        From: {selected.from}
-                        {selected.to ? ` • Receiver: ${selected.to}` : ""}
-                      </div>
-
-                      <div>
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="text-sm font-medium">Caller</div>
+                      <div className="grid grid-cols-2 gap-x-6 gap-y-4 pt-1">
+                        <DetailField label="From">
+                          <span className="font-mono text-[13px]">{selected.from}</span>
+                        </DetailField>
+                        <DetailField
+                          label="Caller"
+                          action={
+                            !callerEditing ? (
+                              <button
+                                type="button"
+                                className="text-[11px] text-indigo-600 hover:text-indigo-700 font-medium"
+                                onClick={() => setCallerEditing(true)}
+                              >
+                                Edit
+                              </button>
+                            ) : null
+                          }
+                        >
                           {callerEditing ? (
-                            <div className="flex items-center gap-2">
-                              <Button
-                                type="button"
-                                size="sm"
-                                className="rounded-xl h-8 px-3"
-                                disabled={callerSaving}
-                                onClick={handleSaveCaller}
-                              >
-                                {callerSaving ? "Saving..." : "Save caller"}
-                              </Button>
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                className="rounded-xl h-8 px-3"
-                                disabled={callerSaving}
-                                onClick={() => {
-                                  setCallerDraft(selected.callerName ?? "");
-                                  setCallerEditing(false);
-                                  setCallerError(null);
-                                }}
-                              >
-                                Cancel
-                              </Button>
+                            <div className="space-y-2">
+                              <Input
+                                value={callerDraft}
+                                onChange={(e) => setCallerDraft(e.target.value)}
+                                placeholder="Caller name"
+                                className="h-8"
+                              />
+                              <div className="flex gap-2">
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  className="rounded-lg h-7 px-3 text-xs"
+                                  disabled={callerSaving}
+                                  onClick={handleSaveCaller}
+                                >
+                                  {callerSaving ? "Saving..." : "Save"}
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  className="rounded-lg h-7 px-3 text-xs"
+                                  disabled={callerSaving}
+                                  onClick={() => {
+                                    setCallerDraft(selected.callerName ?? "");
+                                    setCallerEditing(false);
+                                    setCallerError(null);
+                                  }}
+                                >
+                                  Cancel
+                                </Button>
+                              </div>
+                              {callerError ? (
+                                <div className="text-xs text-red-600">{callerError}</div>
+                              ) : null}
                             </div>
+                          ) : (
+                            <>
+                              {selected.callerName?.trim() ? selected.callerName : "Unknown"}
+                              {selected.callerNameSource === "ai" ? (
+                                <span className="ml-1.5 text-[11px] text-muted-foreground">· AI-inferred</span>
+                              ) : null}
+                            </>
+                          )}
+                        </DetailField>
+                        <DetailField label="Duration">
+                          <span className="font-mono text-[13px]">{formatSecs(selected.durationSec)}</span>
+                        </DetailField>
+                        <DetailField label="Language">
+                          {selected.detectedLanguage || selected.language}
+                          {selected.transcriptEnglish ? (
+                            <span className="ml-1.5 font-mono text-[11px] text-muted-foreground">· translated</span>
                           ) : null}
-                        </div>
-                        {callerEditing ? (
-                          <Input
-                            value={callerDraft}
-                            onChange={(e) => setCallerDraft(e.target.value)}
-                            placeholder="Set caller name (AI inferred or manual)"
-                            className="mt-2"
-                          />
-                        ) : (
-                          <div className="mt-1 text-sm text-muted-foreground">
-                            {selected.callerName?.trim() ? selected.callerName : "Unknown"}
-                          </div>
-                        )}
-                        {callerError ? (
-                          <div className="mt-1 text-xs text-red-600">{callerError}</div>
-                        ) : null}
-                      </div>
-
-                      <div className="flex items-center justify-between text-sm">
-                        <span className="text-muted-foreground">Duration</span>
-                        <span className="font-medium">{formatSecs(selected.durationSec)}</span>
+                        </DetailField>
                       </div>
 
                       <Separator />
 
                       <div>
-                        <div className="text-sm font-medium">Summary</div>
+                        <div className="flex items-center gap-2 mb-1">
+                          <div className="text-[11px] font-mono font-semibold uppercase tracking-wider text-muted-foreground">
+                            Summary
+                          </div>
+                          <span className="inline-flex items-center gap-1 rounded-full text-[10px] font-medium px-2 py-0.5 bg-gradient-to-br from-indigo-50 to-violet-50 border border-indigo-200 text-indigo-700">
+                            <Sparkles className="h-2.5 w-2.5" />
+                            AI generated
+                          </span>
+                        </div>
                         <div
                           className={[
-                            "mt-1 text-sm",
-                            hasNonEmptyText(selected.summary)
-                              ? "text-muted-foreground"
-                              : "text-muted-foreground italic",
+                            "text-[15px] leading-relaxed",
+                            hasNonEmptyText(selected.summary) ? "" : "text-muted-foreground italic",
                           ].join(" ")}
-                        >
-                          {getSummaryText(selected.summary)}
-                        </div>
+                          {...(hasNonEmptyText(selected.summary)
+                            ? { dangerouslySetInnerHTML: { __html: highlightSummary(getSummaryText(selected.summary)) } }
+                            : { children: getSummaryText(selected.summary) })}
+                        />
                       </div>
 
                       <div>
@@ -1519,7 +1566,7 @@ export default function App() {
                                 className={[
                                   "px-2 py-1 text-xs rounded-lg transition",
                                   transcriptVariant === "original"
-                                    ? "bg-purple-600 text-white"
+                                    ? "bg-brand-gradient text-white"
                                     : "text-muted-foreground hover:text-foreground",
                                 ].join(" ")}
                                 onClick={() => setTranscriptVariant("original")}
@@ -1533,7 +1580,7 @@ export default function App() {
                                 className={[
                                   "px-2 py-1 text-xs rounded-lg transition",
                                   transcriptVariant === "en"
-                                    ? "bg-purple-600 text-white"
+                                    ? "bg-brand-gradient text-white"
                                     : "text-muted-foreground hover:text-foreground",
                                 ].join(" ")}
                                 onClick={() => setTranscriptVariant("en")}
@@ -1666,7 +1713,7 @@ export default function App() {
                               <Button
                                 type="button"
                                 size="sm"
-                                className="h-7 rounded-lg px-2 text-xs"
+                                className="h-7 rounded-lg px-2 text-xs bg-brand-gradient hover:opacity-90 text-white border-0"
                                 onClick={handleAcceptSelectedSuggestions}
                                 disabled={
                                   selectedSuggestionCount === 0 || acceptingSuggestions || !selectedAnalysis
@@ -1784,12 +1831,37 @@ export default function App() {
                               </div>
                             </div>
 
+                            {analysisForDisplay.topLevelTagsSuggested.length > 0 ? (
+                              <div>
+                                <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                                  Category tags — needs review ({analysisForDisplay.topLevelTagsSuggested.length})
+                                </div>
+                                <div className="mt-1 flex flex-wrap gap-2">
+                                  {analysisForDisplay.topLevelTagsSuggested.map((tag) => (
+                                    <button
+                                      type="button"
+                                      key={tag.id}
+                                      onClick={() => toggleAnalysisSelection("tagIds", tag.id)}
+                                      className={[
+                                        "rounded-xl border px-2 py-1 text-xs",
+                                        analysisSelection.tagIds[tag.id]
+                                          ? "border-purple-300 bg-purple-50 text-purple-700"
+                                          : "border-zinc-200 bg-white/80 text-muted-foreground",
+                                      ].join(" ")}
+                                    >
+                                      {tag.tag} ({formatConfidence(tag.confidence)})
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : null}
+
                             <div>
                               <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                                Tags ({analysisForDisplay.tags.length})
+                                Suggested tags ({analysisForDisplay.detailTagsSuggested.length})
                               </div>
                               <div className="mt-1 flex flex-wrap gap-2">
-                                {analysisForDisplay.tags.map((tag) => (
+                                {analysisForDisplay.detailTagsSuggested.map((tag) => (
                                   <button
                                     type="button"
                                     key={tag.id}
@@ -1879,34 +1951,11 @@ export default function App() {
 
                       <Separator />
 
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <Badge variant="outline" className="rounded-xl">
-                            {selected.detectedLanguage ? selected.detectedLanguage : selected.language}
-                          </Badge>
-                          {priorityPill(selected.priority)}
-                        </div>
-                        <Dialog>
-                          <DialogTrigger asChild>
-                            <Button className="rounded-2xl" disabled={!selected.requiresAction}>
-                              <CalendarCheck className="h-4 w-4 mr-2" /> Create booking
-                            </Button>
-                          </DialogTrigger>
-                          <DialogContent className="max-w-2xl rounded-2xl">
-                            <DialogHeader>
-                              <DialogTitle>Booking workflow</DialogTitle>
-                              <DialogDescription>
-                                Confirm extracted details, then save.
-                              </DialogDescription>
-                            </DialogHeader>
-                            <BookingWorkflow call={selected} onSave={handleSaveReservation} />
-                            <DialogFooter>
-                              <Button variant="outline" className="rounded-2xl">
-                                Close
-                              </Button>
-                            </DialogFooter>
-                          </DialogContent>
-                        </Dialog>
+                      <div className="flex items-center gap-2">
+                        <Badge variant="outline" className="rounded-xl">
+                          {selected.detectedLanguage ? selected.detectedLanguage : selected.language}
+                        </Badge>
+                        <PriorityPill priority={selected.priority} />
                       </div>
 
                       {!selected.requiresAction && (
@@ -2056,24 +2105,6 @@ export default function App() {
                         </Button>
                       </div>
 
-                      <Separator />
-
-                      <Dialog>
-                        <DialogTrigger asChild>
-                          <Button className="rounded-2xl" disabled={!selected.requiresAction}>
-                            <CalendarCheck className="h-4 w-4 mr-2" /> Open booking workflow
-                          </Button>
-                        </DialogTrigger>
-                        <DialogContent className="max-w-2xl rounded-2xl">
-                          <DialogHeader>
-                            <DialogTitle>Booking workflow</DialogTitle>
-                            <DialogDescription>
-                              Turn a call into a reservation record.
-                            </DialogDescription>
-                          </DialogHeader>
-                          <BookingWorkflow call={selected} onSave={handleSaveReservation} />
-                        </DialogContent>
-                      </Dialog>
                     </>
                   )}
                 </CardContent>

@@ -53,6 +53,7 @@ const callTagsSuggested = pgTable("call_tags_suggested", {
   id: uuid("id").defaultRandom().primaryKey(),
   callId: uuid("call_id").notNull(),
   state: text("state").notNull(),
+  tier: text("tier").notNull(),
   tag: text("tag").notNull(),
   confidence: numeric("confidence", { precision: 4, scale: 3 }).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
@@ -229,11 +230,24 @@ function parseOptionalDueDate(value: string | null): Date | null {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
-function buildCanonicalTag(tags: AnalysisOutput["tags"]): string | null {
+function buildCanonicalTag(
+  tags: Array<{ tag: string; confidence: number }>,
+  autoApplyThreshold: number
+): string | null {
   if (!Array.isArray(tags) || tags.length === 0) return null;
-  const unique = Array.from(new Set(tags.map((t) => t.tag).filter((t) => typeof t === "string" && t.trim().length > 0)));
-  if (unique.length === 0) return null;
-  return unique.join(", ");
+  const confirmed = tags
+    .filter((t) => t.confidence >= autoApplyThreshold)
+    .map((t) => t.tag)
+    .filter((t) => typeof t === "string" && t.trim().length > 0);
+  const unique = Array.from(new Set(confirmed));
+  return unique.length ? unique.join(", ") : null;
+}
+
+function parseTopTagAutoApplyThreshold() {
+  const raw = process.env.LLM_TOP_TAG_AUTO_APPLY_THRESHOLD;
+  const parsed = raw ? Number(raw) : NaN;
+  if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 1) return parsed;
+  return 0.85;
 }
 
 export async function saveSuggestedAnalysis(params: {
@@ -246,7 +260,11 @@ export async function saveSuggestedAnalysis(params: {
   const db = getDb();
   const now = new Date();
 
+  const autoApplyThreshold = parseTopTagAutoApplyThreshold();
+
   await db.delete(callTasksSuggested).where(and(eq(callTasksSuggested.callId, params.callId), eq(callTasksSuggested.state, "suggested")));
+  // Clear any pending auto/suggested tags for this call regardless of tier;
+  // confirmed tags from a previous run are preserved so user acceptances stick.
   await db.delete(callTagsSuggested).where(and(eq(callTagsSuggested.callId, params.callId), eq(callTagsSuggested.state, "suggested")));
   await db
     .delete(callParticipantsSuggested)
@@ -270,11 +288,27 @@ export async function saveSuggestedAnalysis(params: {
     );
   }
 
+  // Top-level tags: auto-apply (state=confirmed) when confidence >= threshold, else state=suggested.
   if (params.analysis.tags.length > 0) {
     await db.insert(callTagsSuggested).values(
       params.analysis.tags.map((tag) => ({
         callId: params.callId,
+        state: tag.confidence >= autoApplyThreshold ? "confirmed" : "suggested",
+        tier: "top",
+        tag: tag.tag,
+        confidence: toConfidence(tag.confidence),
+        createdAt: now,
+      }))
+    );
+  }
+
+  // Detail tags: always land in the suggested flow.
+  if (params.analysis.detail_tags.length > 0) {
+    await db.insert(callTagsSuggested).values(
+      params.analysis.detail_tags.map((tag) => ({
+        callId: params.callId,
         state: "suggested",
+        tier: "detail",
         tag: tag.tag,
         confidence: toConfidence(tag.confidence),
         createdAt: now,
@@ -306,7 +340,7 @@ export async function saveSuggestedAnalysis(params: {
       analysisThresholdSec: params.thresholdSec,
       summarySuggestedShort: params.analysis.summary_short,
       summarySuggestedDetailed: params.analysis.summary_detailed,
-      tag: buildCanonicalTag(params.analysis.tags),
+      tag: buildCanonicalTag(params.analysis.tags, autoApplyThreshold),
       transcriptHash: params.transcriptHash,
       analysisRawOutput: null,
       analysisQualityReliability: params.analysis.quality.transcript_reliability,
