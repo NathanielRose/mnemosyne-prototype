@@ -24,6 +24,11 @@ export type AnalysisTag = {
   confidence: Confidence;
 };
 
+export type AnalysisDetailTag = {
+  tag: string;
+  confidence: Confidence;
+};
+
 export type AnalysisParticipant = {
   name: string | null;
   role: string;
@@ -42,6 +47,7 @@ export type AnalysisOutput = {
   summary_detailed: string;
   tasks: AnalysisTask[];
   tags: AnalysisTag[];
+  detail_tags: AnalysisDetailTag[];
   participants: AnalysisParticipant[];
   quality: AnalysisQuality;
 };
@@ -49,7 +55,15 @@ export type AnalysisOutput = {
 export const ANALYSIS_OUTPUT_JSON_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["summary_short", "summary_detailed", "tasks", "tags", "participants", "quality"],
+  required: [
+    "summary_short",
+    "summary_detailed",
+    "tasks",
+    "tags",
+    "detail_tags",
+    "participants",
+    "quality",
+  ],
   properties: {
     summary_short: { type: "string" },
     summary_detailed: { type: "string" },
@@ -91,6 +105,18 @@ export const ANALYSIS_OUTPUT_JSON_SCHEMA = {
         required: ["tag", "confidence"],
         properties: {
           tag: { type: "string", enum: [...CALL_CATEGORY_TAGS] },
+          confidence: { type: "number", minimum: 0, maximum: 1 },
+        },
+      },
+    },
+    detail_tags: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["tag", "confidence"],
+        properties: {
+          tag: { type: "string", minLength: 1, maxLength: 48 },
           confidence: { type: "number", minimum: 0, maximum: 1 },
         },
       },
@@ -155,6 +181,7 @@ export function validateAnalysisJson(input: unknown): {
       "summary_detailed",
       "tasks",
       "tags",
+      "detail_tags",
       "participants",
       "quality",
     ])
@@ -171,6 +198,9 @@ export function validateAnalysisJson(input: unknown): {
   if (!Array.isArray(input.tags)) {
     errors.push("tags must be array");
   }
+  if (!Array.isArray(input.detail_tags)) {
+    errors.push("detail_tags must be array");
+  }
   if (!Array.isArray(input.participants)) {
     errors.push("participants must be array");
   }
@@ -180,6 +210,7 @@ export function validateAnalysisJson(input: unknown): {
 
   const tasks = Array.isArray(input.tasks) ? input.tasks : [];
   const tags = Array.isArray(input.tags) ? input.tags : [];
+  const detailTags = Array.isArray(input.detail_tags) ? input.detail_tags : [];
   const participants = Array.isArray(input.participants) ? input.participants : [];
   const quality = isRecord(input.quality) ? input.quality : {};
 
@@ -264,6 +295,22 @@ export function validateAnalysisJson(input: unknown): {
     }
   });
 
+  const parsedDetailTags: AnalysisDetailTag[] = [];
+  detailTags.forEach((t, i) => {
+    if (!isRecord(t)) {
+      errors.push(`detail_tags[${i}] must be object`);
+      return;
+    }
+    if (!onlyKeys(t, ["tag", "confidence"])) errors.push(`detail_tags[${i}] has unexpected properties`);
+    if (typeof t.tag !== "string" || t.tag.trim().length === 0) {
+      errors.push(`detail_tags[${i}].tag must be non-empty string`);
+    }
+    if (!inRangeConfidence(t.confidence)) errors.push(`detail_tags[${i}].confidence must be 0..1`);
+    if (typeof t.tag === "string" && t.tag.trim().length > 0 && inRangeConfidence(t.confidence)) {
+      parsedDetailTags.push({ tag: t.tag.trim(), confidence: t.confidence });
+    }
+  });
+
   const parsedParticipants: AnalysisParticipant[] = [];
   participants.forEach((p, i) => {
     if (!isRecord(p)) {
@@ -314,6 +361,7 @@ export function validateAnalysisJson(input: unknown): {
       summary_detailed: input.summary_detailed as string,
       tasks: parsedTasks,
       tags: parsedTags,
+      detail_tags: parsedDetailTags,
       participants: parsedParticipants,
       quality: {
         transcript_reliability: reliability as Reliability,

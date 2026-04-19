@@ -101,6 +101,7 @@ export const callTagsSuggested = pgTable("call_tags_suggested", {
   id: uuid("id").defaultRandom().primaryKey(),
   callId: uuid("call_id").notNull(),
   state: text("state").notNull(),
+  tier: text("tier").notNull(),
   tag: text("tag").notNull(),
   confidence: numeric("confidence", { precision: 4, scale: 3 }).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
