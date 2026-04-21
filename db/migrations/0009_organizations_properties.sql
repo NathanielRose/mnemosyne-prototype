@@ -29,7 +29,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS properties_org_position_unique
   ON properties(organization_id, position);
 
 ALTER TABLE calls
-  ADD COLUMN IF NOT EXISTS property_id UUID REFERENCES properties(id);
+  ADD COLUMN IF NOT EXISTS property_id UUID REFERENCES properties(id) ON DELETE SET NULL;
 
 CREATE INDEX IF NOT EXISTS calls_property_id_idx ON calls(property_id);
 

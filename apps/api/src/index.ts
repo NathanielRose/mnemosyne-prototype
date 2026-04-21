@@ -37,6 +37,18 @@ function toNumberOrNull(v: unknown) {
   return null;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Returns the trimmed UUID, null when the param is absent/empty, or "invalid"
+// for strings that aren't UUIDs (caller should reply 400). Prevents Postgres
+// from receiving non-UUID input bound to a uuid column and throwing a cast
+// error that the client sees as a misleading 503.
+function parsePropertyIdParam(v: unknown): string | null | "invalid" {
+  if (typeof v !== "string" || v.trim().length === 0) return null;
+  const s = v.trim();
+  return UUID_RE.test(s) ? s : "invalid";
+}
+
 const app = Fastify({
   logger: true,
 });
@@ -331,7 +343,7 @@ app.get("/properties", async (request, reply) => {
         coverImageUrl: properties.coverImageUrl,
       })
       .from(properties)
-      .orderBy(asc(properties.position));
+      .orderBy(asc(properties.organizationId), asc(properties.position));
 
     reply.send(rows);
   } catch (err: any) {
@@ -350,8 +362,11 @@ app.get("/calls", async (request, reply) => {
   const safeLimit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 50) : 6;
   const parsedOffset = Number(offset);
   const safeOffset = Number.isFinite(parsedOffset) ? Math.max(parsedOffset, 0) : 0;
-  const safePropertyId =
-    typeof propertyId === "string" && propertyId.trim().length > 0 ? propertyId.trim() : null;
+  const parsedPropertyId = parsePropertyIdParam(propertyId);
+  if (parsedPropertyId === "invalid") {
+    return reply.code(400).send({ ok: false, error: "INVALID_PROPERTY_ID" });
+  }
+  const safePropertyId = parsedPropertyId;
 
   try {
     const { db } = getDb();
@@ -497,8 +512,11 @@ app.get("/calls/deleted", async (request, reply) => {
   const safeLimit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 200) : 50;
   const parsedOffset = Number(offset);
   const safeOffset = Number.isFinite(parsedOffset) ? Math.max(parsedOffset, 0) : 0;
-  const safePropertyId =
-    typeof propertyId === "string" && propertyId.trim().length > 0 ? propertyId.trim() : null;
+  const parsedPropertyId = parsePropertyIdParam(propertyId);
+  if (parsedPropertyId === "invalid") {
+    return reply.code(400).send({ ok: false, error: "INVALID_PROPERTY_ID" });
+  }
+  const safePropertyId = parsedPropertyId;
 
   try {
     const { db } = getDb();
@@ -1103,8 +1121,11 @@ app.get("/tasks", async (request, reply) => {
   const safeState = state?.trim() || "confirmed";
   const parsedLimit = Number(limit);
   const safeLimit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 200) : 100;
-  const safePropertyId =
-    typeof propertyId === "string" && propertyId.trim().length > 0 ? propertyId.trim() : null;
+  const parsedPropertyId = parsePropertyIdParam(propertyId);
+  if (parsedPropertyId === "invalid") {
+    return reply.code(400).send({ ok: false, error: "INVALID_PROPERTY_ID" });
+  }
+  const safePropertyId = parsedPropertyId;
   try {
     const { db } = getDb();
     const rows = await db
