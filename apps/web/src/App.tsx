@@ -17,6 +17,7 @@ import {
   X,
   Trash2,
   MoreHorizontal,
+  User,
 } from "lucide-react";
 
 import {
@@ -49,6 +50,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 
 import {
   ResponsiveContainer,
@@ -78,11 +84,11 @@ const formatSecs = (s: number) => {
 };
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || "http://localhost:8080";
-const PAGE_SIZE = 6;
+const PAGE_SIZE = 20;
 
-const formatWhen = (iso: string) => {
+const formatWhen = (iso: string): { date: string; time: string } => {
   const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
+  if (Number.isNaN(d.getTime())) return { date: iso, time: "" };
 
   const now = new Date();
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -94,17 +100,19 @@ const formatWhen = (iso: string) => {
     minute: "2-digit",
   });
 
-  if (d >= startOfToday) return `Today ${time}`;
-  if (d >= startOfYesterday) return `Yesterday ${time}`;
+  if (d >= startOfToday) return { date: "Today", time };
+  if (d >= startOfYesterday) return { date: "Yesterday", time };
 
   const startOfPastWeek = new Date(startOfToday);
   startOfPastWeek.setDate(startOfPastWeek.getDate() - 6);
   if (d >= startOfPastWeek) {
-    const weekday = d.toLocaleDateString(undefined, { weekday: "short" });
-    return `${weekday} ${time}`;
+    return { date: d.toLocaleDateString(undefined, { weekday: "short" }), time };
   }
 
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return {
+    date: d.toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+    time,
+  };
 };
 
 const hasNonEmptyText = (value?: string | null) =>
@@ -136,10 +144,11 @@ type ReservationDraft = {
 
 type CallRecord = {
   id: string;
-  when: string; // e.g., "Today 09:12"
+  when: { date: string; time: string };
   iso: string; // e.g., "2026-01-28T09:12:00"
   from: string;
   callerName?: string;
+  callerNameSource?: string | null;
   to?: string;
   durationSec: number;
   language: "Greek" | "English";
@@ -160,6 +169,51 @@ type CallRecord = {
   tag?: string; // e.g., "Wedding"
   rateEUR?: number; // show for booked calls
   topLevelTags?: TopLevelTag[];
+  hasPendingSuggestions?: boolean;
+  hasConfirmedTask?: boolean;
+};
+
+type Property = {
+  id: string;
+  name: string;
+  position: number;
+  phoneNumber: string;
+  address?: string | null;
+  websiteUrl?: string | null;
+  coverImageUrl?: string | null;
+};
+
+const SELECTED_PROPERTY_STORAGE_KEY = "mnemo.selectedPropertyId";
+const DISMISSED_NOTIFICATIONS_STORAGE_KEY = "mnemo.dismissedNotificationIds";
+const NOTIFICATIONS_POLL_MS = 60_000;
+
+type Notification = {
+  id: string;
+  kind: "task" | "suggestion";
+  callExternalId: string;
+  callerName: string | null;
+  fromNumber: string;
+  summary: string;
+  startedAt: string;
+  propertyId: string | null;
+  propertyName: string | null;
+};
+
+type TabValue = "timeline" | "todo" | "insights";
+type PendingNav = { callExternalId: string; tab: TabValue } | null;
+
+const formatRelative = (iso: string): string => {
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return "";
+  const diff = Date.now() - t;
+  const mins = Math.round(diff / 60_000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.round(hrs / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 };
 
 type ApiCall = {
@@ -187,6 +241,8 @@ type ApiCall = {
   tag: string | null;
   rateEur: number | string | null;
   topLevelTags?: string[];
+  hasPendingSuggestions?: boolean;
+  hasConfirmedTask?: boolean;
 };
 
 type ConfirmedTask = {
@@ -315,9 +371,10 @@ const AVATAR_GRADIENTS = [
 
 function avatarFor(call: { id: string; callerName?: string }) {
   const name = (call.callerName ?? "").trim();
-  let label: string;
+  let label = "";
+  let unknown = false;
   if (!name) {
-    label = "?";
+    unknown = true;
   } else {
     const parts = name.split(/\s+/).filter(Boolean);
     if (parts.length >= 2) {
@@ -325,12 +382,12 @@ function avatarFor(call: { id: string; callerName?: string }) {
     } else if (parts[0]) {
       label = parts[0].slice(0, 2).toUpperCase();
     } else {
-      label = "?";
+      unknown = true;
     }
   }
   const h = call.id.split("").reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
   const cls = AVATAR_GRADIENTS[h % AVATAR_GRADIENTS.length];
-  return { label, cls };
+  return { label, cls, unknown };
 }
 
 // Bolds date-range, currency, and room-type phrases in the feed summary.
@@ -471,70 +528,75 @@ function CallRow({
     >
       <div
         className={[
-          "grid grid-cols-[44px_1fr_auto] gap-4 px-5 py-4 border-b border-zinc-100 transition",
+          "grid grid-cols-[44px_1fr_auto] gap-x-4 gap-y-1.5 px-5 py-4 border-b border-zinc-100 transition",
           isSelected ? "row-selected" : "hover:bg-zinc-50/70",
         ].join(" ")}
       >
         <div
           className={[
-            "h-[42px] w-[42px] rounded-full border border-zinc-200 grid place-items-center text-sm font-semibold",
+            "row-span-3 self-start h-[42px] w-[42px] rounded-full border border-zinc-200 grid place-items-center text-sm font-semibold",
             avatar.cls,
           ].join(" ")}
         >
-          {avatar.label}
+          {avatar.unknown ? <Phone className="h-4 w-4" /> : avatar.label}
         </div>
 
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 mb-1.5">
-            <span className="text-sm font-semibold">{call.when}</span>
-            <span className="h-[3px] w-[3px] rounded-full bg-zinc-400" />
-            <span className="font-mono text-xs text-muted-foreground truncate">{call.from}</span>
-          </div>
-
-          <div className="flex flex-wrap gap-1.5 mb-2">
-            {(call.topLevelTags ?? []).map((t) => (
-              <span key={`${call.id}-top-${t}`} className={`${topLevelTagClass[t]} text-[11px] px-2.5 py-0.5`}>
-                {t}
-              </span>
-            ))}
-            {lang ? (
-              <span className="inline-flex items-center rounded-full text-[11px] px-2.5 py-0.5 bg-zinc-100 text-zinc-600 border border-zinc-200">
-                {langCode} · {lang}
-              </span>
-            ) : null}
-            {call.requiresAction ? (
-              <span className="inline-flex items-center gap-1 rounded-full text-[11px] px-2.5 py-0.5 bg-amber-50 text-amber-800 border border-amber-200">
-                <span className="h-[5px] w-[5px] rounded-full bg-current" />
-                Needs action
-              </span>
-            ) : null}
-          </div>
-
-          <div
-            className={[
-              "text-sm leading-5 line-clamp-2 max-w-xl",
-              hasSummary ? "" : "text-muted-foreground italic",
-            ].join(" ")}
-            {...(hasSummary
-              ? { dangerouslySetInnerHTML: { __html: highlightSummary(summaryText) } }
-              : { children: summaryText })}
-          />
+        <div className="min-w-0 flex items-center gap-2">
+          <span className="text-sm font-semibold">{call.when.date}</span>
+          {call.when.time ? (
+            <span className="text-xs text-muted-foreground">{call.when.time}</span>
+          ) : null}
+          <span className="h-[3px] w-[3px] rounded-full bg-zinc-400" />
+          <span className="font-mono text-xs text-muted-foreground truncate">{call.from}</span>
         </div>
-
-        <div className="flex flex-col items-end gap-1.5 min-w-[92px]">
+        <div className="flex items-center justify-end min-w-[92px]">
           {call.outcome === "Booked" && typeof call.rateEUR === "number" ? (
             <div className="text-lg font-semibold tracking-tight text-indigo-700 tabular-nums">
               €{call.rateEUR}
               <span className="ml-0.5 text-[11px] font-normal text-muted-foreground">/ night</span>
             </div>
           ) : null}
-          <PriorityPill priority={call.priority} />
-          <div className="flex items-center gap-1 font-mono text-xs text-muted-foreground">
-            <Clock className="h-3 w-3" /> {formatSecs(call.durationSec)}
-          </div>
-          <div className="font-mono text-[10px] text-zinc-400" title={call.id}>
-            SID · {call.id.slice(-6)}
-          </div>
+        </div>
+
+        <div className="min-w-0 flex flex-wrap items-center gap-1.5">
+          {(call.topLevelTags ?? []).map((t) => (
+            <span key={`${call.id}-top-${t}`} className={`${topLevelTagClass[t]} text-[11px] px-2.5 py-0.5`}>
+              {t}
+            </span>
+          ))}
+          {lang ? (
+            <span className="inline-flex items-center rounded-full text-[11px] px-2.5 py-0.5 bg-zinc-100 text-zinc-600 border border-zinc-200">
+              {langCode} · {lang}
+            </span>
+          ) : null}
+          {call.hasPendingSuggestions ? (
+            <span className="inline-flex items-center gap-1 rounded-full text-[11px] px-2.5 py-0.5 bg-gradient-to-br from-indigo-50 to-violet-50 border border-indigo-200 text-indigo-700">
+              <Sparkles className="h-3 w-3" />
+              Suggestions
+            </span>
+          ) : null}
+          {call.requiresAction || call.hasConfirmedTask ? (
+            <span className="inline-flex items-center gap-1 rounded-full text-[11px] px-2.5 py-0.5 bg-amber-50 text-amber-800 border border-amber-200">
+              <span className="h-[5px] w-[5px] rounded-full bg-current" />
+              Needs action
+            </span>
+          ) : null}
+        </div>
+        <div className="flex items-center justify-end gap-1 font-mono text-xs text-muted-foreground min-w-[92px]">
+          <Clock className="h-3 w-3" /> {formatSecs(call.durationSec)}
+        </div>
+
+        <div
+          className={[
+            "min-w-0 text-sm leading-5 line-clamp-2 max-w-xl",
+            hasSummary ? "" : "text-muted-foreground italic",
+          ].join(" ")}
+          {...(hasSummary
+            ? { dangerouslySetInnerHTML: { __html: highlightSummary(summaryText) } }
+            : { children: summaryText })}
+        />
+        <div className="flex items-start justify-end font-mono text-[10px] text-zinc-400 min-w-[92px]" title={call.id}>
+          SID · {call.id.slice(-6)}
         </div>
       </div>
     </button>
@@ -563,22 +625,6 @@ function DetailField({
   );
 }
 
-function PriorityPill({ priority }: { priority: CallRecord["priority"] }) {
-  const map: Record<CallRecord["priority"], string> = {
-    High: "bg-red-50 text-red-700 border-red-200",
-    Medium: "bg-amber-50 text-amber-800 border-amber-200",
-    Low: "bg-zinc-50 text-zinc-600 border-zinc-200",
-  };
-  return (
-    <span
-      className={`inline-flex items-center gap-1 rounded-full border text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 ${map[priority]}`}
-    >
-      <span className="h-[5px] w-[5px] rounded-full bg-current" />
-      {priority}
-    </span>
-  );
-}
-
 
 function mapApiCall(row: ApiCall): CallRecord {
   const rate = row.rateEur !== null ? Number(row.rateEur) : undefined;
@@ -589,6 +635,7 @@ function mapApiCall(row: ApiCall): CallRecord {
     iso,
     from: row.fromNumber,
     callerName: row.callerName ?? undefined,
+    callerNameSource: row.callerNameSource ?? null,
     to: row.toNumber ?? undefined,
     durationSec: row.durationSec,
     language: row.language,
@@ -608,12 +655,13 @@ function mapApiCall(row: ApiCall): CallRecord {
     topLevelTags: Array.isArray(row.topLevelTags)
       ? row.topLevelTags.filter(isTopLevelTag)
       : undefined,
+    hasPendingSuggestions: row.hasPendingSuggestions ?? false,
+    hasConfirmedTask: row.hasConfirmedTask ?? false,
   };
 }
 
 export default function App() {
   const [calls, setCalls] = useState<CallRecord[]>([]);
-  const [deletedCalls, setDeletedCalls] = useState<CallRecord[]>([]);
   const [selected, setSelected] = useState<CallRecord | null>(null);
   const [query, setQuery] = useState<string>("");
   const [transcriptExpanded, setTranscriptExpanded] = useState<boolean>(false);
@@ -646,42 +694,91 @@ export default function App() {
   const [deletingCall, setDeletingCall] = useState<boolean>(false);
   const [deleteCallError, setDeleteCallError] = useState<string | null>(null);
   const [detailsMenuOpen, setDetailsMenuOpen] = useState<boolean>(false);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [dismissedIds, setDismissedIds] = useState<Set<string>>(() => {
+    if (typeof window === "undefined") return new Set();
+    try {
+      const raw = window.localStorage.getItem(DISMISSED_NOTIFICATIONS_STORAGE_KEY);
+      return new Set(raw ? (JSON.parse(raw) as string[]) : []);
+    } catch {
+      return new Set();
+    }
+  });
+  const [notificationsOpen, setNotificationsOpen] = useState<boolean>(false);
+  const [activeTab, setActiveTab] = useState<TabValue>("timeline");
+  const [pendingNav, setPendingNav] = useState<PendingNav>(null);
+  const [properties, setProperties] = useState<Property[]>([]);
+  const [selectedPropertyId, setSelectedPropertyId] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    const stored = window.localStorage.getItem(SELECTED_PROPERTY_STORAGE_KEY);
+    return stored && stored.length > 0 && stored !== "all" ? stored : null;
+  });
 
   useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await fetch(`${apiBaseUrl}/properties`);
+        if (!res.ok) throw new Error(`Failed to load properties: ${res.status}`);
+        const data = (await res.json()) as Property[];
+        if (cancelled) return;
+        const list = Array.isArray(data) ? [...data].sort((a, b) => a.position - b.position) : [];
+        setProperties(list);
+        setSelectedPropertyId((current) => {
+          if (current && list.some((p) => p.id === current)) return current;
+          return list[0]?.id ?? null;
+        });
+      } catch {
+        if (!cancelled) setProperties([]);
+      }
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (selectedPropertyId) {
+      window.localStorage.setItem(SELECTED_PROPERTY_STORAGE_KEY, selectedPropertyId);
+    }
+  }, [selectedPropertyId]);
+
+  const propertyQuerySuffix = selectedPropertyId
+    ? `&propertyId=${encodeURIComponent(selectedPropertyId)}`
+    : "";
+
+  const selectedProperty = selectedPropertyId
+    ? properties.find((p) => p.id === selectedPropertyId) ?? null
+    : null;
+
+  useEffect(() => {
+    if (selectedPropertyId === null) return;
     let cancelled = false;
     const controller = new AbortController();
 
     const loadCalls = async () => {
       try {
-        const [res, deletedRes] = await Promise.all([
-          fetch(`${apiBaseUrl}/calls?limit=${PAGE_SIZE + 1}&offset=0`, {
-            signal: controller.signal,
-          }),
-          fetch(`${apiBaseUrl}/calls/deleted?limit=200&offset=0`, {
-            signal: controller.signal,
-          }),
-        ]);
+        const res = await fetch(
+          `${apiBaseUrl}/calls?limit=${PAGE_SIZE + 1}&offset=0${propertyQuerySuffix}`,
+          { signal: controller.signal }
+        );
         if (!res.ok) throw new Error(`Failed to load calls: ${res.status}`);
-        if (!deletedRes.ok) throw new Error(`Failed to load deleted calls: ${deletedRes.status}`);
         const data = (await res.json()) as ApiCall[];
-        const deletedData = (await deletedRes.json()) as ApiCall[];
         if (!Array.isArray(data)) throw new Error("Invalid calls payload");
-        if (!Array.isArray(deletedData)) throw new Error("Invalid deleted calls payload");
 
         const hasMore = data.length > PAGE_SIZE;
         const mapped = data.slice(0, PAGE_SIZE).map(mapApiCall);
-        const deletedMapped = deletedData.map(mapApiCall);
 
         if (!cancelled) {
           setCalls(mapped);
-          setDeletedCalls(deletedMapped);
           setSelected(mapped[0] ?? null);
           setHasMoreCalls(hasMore);
         }
       } catch {
         if (!cancelled) {
           setCalls([]);
-          setDeletedCalls([]);
           setSelected(null);
           setHasMoreCalls(false);
         }
@@ -694,7 +791,7 @@ export default function App() {
       cancelled = true;
       controller.abort();
     };
-  }, []);
+  }, [selectedPropertyId, propertyQuerySuffix]);
 
   useEffect(() => {
     setTranscriptExpanded(false);
@@ -718,7 +815,7 @@ export default function App() {
     setConfirmedTasksLoading(true);
     setConfirmedTasksError(null);
     try {
-      const res = await fetch(`${apiBaseUrl}/tasks?state=confirmed`);
+      const res = await fetch(`${apiBaseUrl}/tasks?state=confirmed${propertyQuerySuffix}`);
       if (!res.ok) throw new Error(`Failed to load tasks: ${res.status}`);
       const data = (await res.json()) as { ok?: boolean; tasks?: ConfirmedTask[] };
       setConfirmedTasks(Array.isArray(data.tasks) ? data.tasks : []);
@@ -731,8 +828,10 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (selectedPropertyId === null) return;
     loadConfirmedTasks();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPropertyId, propertyQuerySuffix]);
 
   useEffect(() => {
     let cancelled = false;
@@ -773,31 +872,52 @@ export default function App() {
     };
   }, [selected?.id]);
 
-  const filtered = useMemo(() => {
-    if (!query.trim()) return calls;
-    const q = query.toLowerCase();
-    return calls.filter((c) =>
-      [c.id, c.from, c.summary, c.transcriptPreview, c.language, c.outcome]
-        .join(" ")
-        .toLowerCase()
-        .includes(q)
-    );
-  }, [calls, query]);
 
   const last6 = useMemo(() => {
     return [...calls].sort((a, b) => (a.iso < b.iso ? 1 : -1));
   }, [calls]);
 
+  const todoItems = useMemo(() => {
+    const covered = new Set(confirmedTasks.map((t) => t.externalId));
+    const fromConfirmed = confirmedTasks.map((t) => ({
+      id: t.id,
+      source: "confirmed" as const,
+      title: t.title,
+      description: t.description,
+      externalId: t.externalId,
+      fromNumber: t.fromNumber,
+      callerName: t.callerName ?? null,
+      priority: t.priority,
+      status: t.status,
+      confidence: t.confidence ?? null,
+    }));
+    const fromCalls = calls
+      .filter((c) => c.requiresAction && !covered.has(c.id))
+      .map((c) => ({
+        id: `call:${c.id}`,
+        source: "requires-action" as const,
+        title: hasNonEmptyText(c.summary) ? c.summary : "Call requires follow-up",
+        description: c.transcriptPreview ?? "",
+        externalId: c.id,
+        fromNumber: c.from,
+        callerName: c.callerName ?? null,
+        priority: c.priority,
+        status: c.outcome,
+        confidence: null as number | null,
+      }));
+    return [...fromConfirmed, ...fromCalls];
+  }, [confirmedTasks, calls]);
+
   const needsAction = useMemo(() => {
-    if (!query.trim()) return confirmedTasks;
+    if (!query.trim()) return todoItems;
     const q = query.toLowerCase();
-    return confirmedTasks.filter((t) =>
+    return todoItems.filter((t) =>
       [t.title, t.description, t.externalId, t.fromNumber, t.callerName ?? ""]
         .join(" ")
         .toLowerCase()
         .includes(q)
     );
-  }, [confirmedTasks, query]);
+  }, [todoItems, query]);
 
   const avgLen = useMemo(() => {
     const xs = calls.map((c) => c.durationSec);
@@ -810,9 +930,79 @@ export default function App() {
     return weekSeries.reduce((a, b) => a + b.calls, 0);
   }, []);
 
-  const notifCount = useMemo(() => {
-    return calls.filter((c) => c.requiresAction).length;
+  const bookingsThisWeek = useMemo(() => {
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    return calls.filter(
+      (c) => c.outcome === "Booked" && new Date(c.iso).getTime() >= cutoff
+    ).length;
   }, [calls]);
+
+  const unreadNotificationCount = useMemo(
+    () => notifications.filter((n) => !dismissedIds.has(n.id)).length,
+    [notifications, dismissedIds]
+  );
+
+  const loadNotifications = async () => {
+    try {
+      const res = await fetch(`${apiBaseUrl}/notifications`);
+      if (!res.ok) throw new Error(`Failed to load notifications: ${res.status}`);
+      const data = (await res.json()) as { items?: Notification[] };
+      setNotifications(Array.isArray(data.items) ? data.items : []);
+    } catch {
+      setNotifications([]);
+    }
+  };
+
+  useEffect(() => {
+    loadNotifications();
+    const interval = window.setInterval(loadNotifications, NOTIFICATIONS_POLL_MS);
+    return () => window.clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(
+      DISMISSED_NOTIFICATIONS_STORAGE_KEY,
+      JSON.stringify([...dismissedIds])
+    );
+  }, [dismissedIds]);
+
+  useEffect(() => {
+    if (!pendingNav) return;
+    const target = calls.find((c) => c.id === pendingNav.callExternalId);
+    if (!target) return;
+    setSelected(target);
+    setActiveTab(pendingNav.tab);
+    setPendingNav(null);
+  }, [calls, pendingNav]);
+
+  const handleNotificationClick = (n: Notification) => {
+    setDismissedIds((prev) => {
+      if (prev.has(n.id)) return prev;
+      const next = new Set(prev);
+      next.add(n.id);
+      return next;
+    });
+    setNotificationsOpen(false);
+    const tab: TabValue = n.kind === "task" ? "todo" : "timeline";
+    if (n.propertyId && n.propertyId !== selectedPropertyId) {
+      setSelectedPropertyId(n.propertyId);
+      setPendingNav({ callExternalId: n.callExternalId, tab });
+      return;
+    }
+    const target = calls.find((c) => c.id === n.callExternalId);
+    if (target) setSelected(target);
+    setActiveTab(tab);
+  };
+
+  const handleMarkAllNotificationsRead = () => {
+    setDismissedIds((prev) => {
+      const next = new Set(prev);
+      for (const n of notifications) next.add(n.id);
+      return next;
+    });
+  };
   const formatConfidence = (v?: number | null) =>
     typeof v === "number" && Number.isFinite(v) ? `${Math.round(v * 100)}%` : "n/a";
   const toggleEvidence = (key: string) =>
@@ -950,7 +1140,7 @@ export default function App() {
       );
       setCallerDraft(nextCaller ?? "");
       setCallerEditing(false);
-      await loadConfirmedTasks();
+      await Promise.all([loadConfirmedTasks(), loadNotifications()]);
     } catch {
       setCallerError("Could not save caller name.");
     } finally {
@@ -981,7 +1171,7 @@ export default function App() {
         setSelectedAnalysis(null);
       }
       setAnalysisSelection(EMPTY_ANALYSIS_SELECTION);
-      await loadConfirmedTasks();
+      await Promise.all([loadConfirmedTasks(), loadNotifications()]);
     } catch {
       setDismissSuggestionsError("Could not dismiss all suggestions. Please try again.");
     } finally {
@@ -1084,7 +1274,7 @@ export default function App() {
         setSelectedAnalysis(null);
       }
       setAnalysisSelection(EMPTY_ANALYSIS_SELECTION);
-      await loadConfirmedTasks();
+      await Promise.all([loadConfirmedTasks(), loadNotifications()]);
     } catch {
       setAcceptSuggestionsError("Could not accept selected suggestions. Please try again.");
     } finally {
@@ -1095,7 +1285,7 @@ export default function App() {
   const handleDeleteSelectedCall = async () => {
     if (!selected || deletingCall) return;
     const confirmed = window.confirm(
-      `Move call ${selected.id.slice(-6)} to Deleted calls? You can still view it in the Deleted tab.`
+      `Archive call ${selected.id.slice(-6)}? It will be hidden from the timeline but kept on the server.`
     );
     if (!confirmed) return;
     setDeletingCall(true);
@@ -1107,12 +1297,12 @@ export default function App() {
       });
       if (!res.ok) throw new Error(`Failed to delete call: ${res.status}`);
 
-      setDeletedCalls((prev) => [deleting, ...prev.filter((c) => c.id !== deleting.id)]);
       setCalls((prev) => {
         const remaining = prev.filter((c) => c.id !== deleting.id);
         setSelected((curr) => (curr?.id === deleting.id ? (remaining[0] ?? null) : curr));
         return remaining;
       });
+      await loadNotifications();
     } catch {
       setDeleteCallError("Could not delete call. Please try again.");
     } finally {
@@ -1133,7 +1323,7 @@ export default function App() {
               <div className="leading-tight">
                 <div className="flex items-center gap-2">
                   <div className="text-sm font-semibold tracking-widest uppercase font-mono">
-                    <span className="bg-gradient-to-r from-fuchsia-500 to-purple-500 bg-clip-text text-transparent font-semibold">
+                    <span className="text-brand-gradient font-semibold">
                       Μneemi AI
                     </span>
                   </div>
@@ -1142,7 +1332,7 @@ export default function App() {
                   </Badge>
                 </div>
                 <div className="text-xs text-muted-foreground">
-                  ARXONTIKO Hotel & Restaurant • Call-to-booking dashboard
+                  A memory for every voice.
                 </div>
               </div>
             </div>
@@ -1180,29 +1370,145 @@ export default function App() {
                 </div>
               </div>
 
+              <Popover open={notificationsOpen} onOpenChange={setNotificationsOpen}>
+                <PopoverTrigger asChild>
+                  <button
+                    className="relative h-11 w-11 rounded-full border bg-background/70 backdrop-blur shadow-sm hover:shadow transition flex items-center justify-center"
+                    aria-label="Notifications"
+                    title="Notifications"
+                  >
+                    <Bell className="h-5 w-5" />
+                    {unreadNotificationCount > 0 && (
+                      <span className="absolute -top-1 -right-1 h-5 min-w-[20px] px-1 rounded-full bg-brand-gradient text-white text-[11px] font-semibold flex items-center justify-center">
+                        {unreadNotificationCount}
+                      </span>
+                    )}
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent align="end" className="w-[360px] max-h-[480px] overflow-y-auto p-0">
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-100">
+                    <div className="text-sm font-semibold">Notifications</div>
+                    {unreadNotificationCount > 0 ? (
+                      <button
+                        type="button"
+                        className="text-xs text-indigo-600 hover:text-indigo-700 font-medium"
+                        onClick={handleMarkAllNotificationsRead}
+                      >
+                        Mark all as read
+                      </button>
+                    ) : null}
+                  </div>
+                  {notifications.length === 0 ? (
+                    <div className="px-4 py-6 text-sm text-muted-foreground">
+                      You're all caught up.
+                    </div>
+                  ) : (
+                    <ul className="divide-y divide-zinc-100">
+                      {notifications.map((n) => {
+                        const isUnread = !dismissedIds.has(n.id);
+                        const isTask = n.kind === "task";
+                        return (
+                          <li key={n.id}>
+                            <button
+                              type="button"
+                              onClick={() => handleNotificationClick(n)}
+                              className="w-full text-left px-4 py-3 flex items-start gap-3 hover:bg-zinc-50 transition"
+                            >
+                              <span className="mt-0.5 shrink-0 relative flex h-6 w-6 items-center justify-center rounded-full border bg-white">
+                                {isTask ? (
+                                  <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
+                                ) : (
+                                  <Sparkles className="h-3.5 w-3.5 text-indigo-600" />
+                                )}
+                                {isUnread ? (
+                                  <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-brand-gradient" />
+                                ) : null}
+                              </span>
+                              <div className="min-w-0 flex-1">
+                                <div className="text-sm line-clamp-2">
+                                  {getSummaryText(n.summary)}
+                                </div>
+                                <div className="mt-1 text-[11px] text-muted-foreground truncate">
+                                  {n.propertyName ?? "Unassigned"} • {formatRelative(n.startedAt)}
+                                  {" • "}
+                                  {n.callerName?.trim() ? n.callerName : n.fromNumber}
+                                </div>
+                                <div className="mt-1 text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">
+                                  {isTask ? "To-do" : "AI suggestions"}
+                                </div>
+                              </div>
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </PopoverContent>
+              </Popover>
+
               <button
-                className="relative h-11 w-11 rounded-full border bg-background/70 backdrop-blur shadow-sm hover:shadow transition flex items-center justify-center"
-                aria-label="Notifications"
-                title="Notifications"
+                className="h-11 w-11 rounded-full border bg-background/70 backdrop-blur shadow-sm hover:shadow transition flex items-center justify-center text-muted-foreground"
+                aria-label="Account"
+                title="Account (settings coming soon)"
               >
-                <Bell className="h-5 w-5" />
-                {notifCount > 0 && (
-                  <span className="absolute -top-1 -right-1 h-5 min-w-[20px] px-1 rounded-full bg-gradient-to-r from-fuchsia-500 to-purple-500 text-white text-[11px] font-semibold flex items-center justify-center">
-                    {notifCount}
-                  </span>
-                )}
+                <User className="h-5 w-5" />
               </button>
             </div>
           </div>
 
-          <div className="flex items-end justify-between">
-            <div>
-              <h1 className="text-2xl md:text-3xl font-semibold">
-                ARXONTIKO Hotel & Restaurant
-              </h1>
-              <p className="mt-1 text-sm text-muted-foreground">
-                Review calls • confirm bookings • zero missed reservations
-              </p>
+          <div
+            className="relative w-full rounded-2xl overflow-hidden border border-zinc-200 bg-zinc-100 bg-cover bg-center shadow-sm"
+            style={
+              selectedProperty?.coverImageUrl
+                ? { backgroundImage: `url("${selectedProperty.coverImageUrl}")` }
+                : undefined
+            }
+          >
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-0 bg-gradient-to-r from-black/60 via-black/25 to-transparent"
+            />
+            <div className="relative min-w-0 p-4">
+              <div className="inline-flex items-center">
+                {properties.length > 0 && selectedPropertyId ? (
+                  <Select
+                    value={selectedPropertyId}
+                    onValueChange={(v) => setSelectedPropertyId(v)}
+                  >
+                    <SelectTrigger className="h-auto w-fit rounded-xl border border-white/60 bg-white/85 backdrop-blur-sm px-3 py-1.5 text-base md:text-lg font-semibold shadow-sm hover:bg-white/95 focus:ring-0 focus-visible:ring-0 [&>svg]:ml-2 [&>svg]:h-4 [&>svg]:w-4 [&>svg]:opacity-60">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {properties.map((p) => (
+                        <SelectItem key={p.id} value={p.id}>
+                          <span className="text-brand-gradient font-semibold">{p.name}</span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <span className="text-base md:text-lg font-semibold text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.45)]">
+                    Loading…
+                  </span>
+                )}
+              </div>
+              {selectedProperty ? (
+                <p className="mt-1 text-sm text-white/90 drop-shadow-[0_1px_2px_rgba(0,0,0,0.45)]">
+                  {selectedProperty.websiteUrl ? (
+                    <a
+                      href={selectedProperty.websiteUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="underline underline-offset-2 hover:text-white"
+                    >
+                      {selectedProperty.name}
+                    </a>
+                  ) : (
+                    selectedProperty.name
+                  )}
+                  {selectedProperty.address ? <> {"• "}{selectedProperty.address}</> : null}
+                </p>
+              ) : null}
             </div>
           </div>
         </div>
@@ -1254,16 +1560,19 @@ export default function App() {
             trend={{ tone: "warn", label: "follow-up within 4 h" }}
           />
           <Stat
-            label="Bookings (sample)"
-            value={`${calls.filter((c) => c.outcome === "Booked").length}`}
-            unit="sample"
+            label="Bookings this week"
+            value={`${bookingsThisWeek}`}
+            unit={bookingsThisWeek === 1 ? "booking" : "bookings"}
             icon={CalendarCheck}
             tone="green"
-            trend={{ tone: "up", value: "€540", label: "booked value" }}
           />
         </div>
 
-        <Tabs defaultValue="timeline" className="w-full">
+        <Tabs
+          value={activeTab}
+          onValueChange={(v) => setActiveTab(v as TabValue)}
+          className="w-full"
+        >
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <TabsList className="rounded-2xl bg-white border border-zinc-200 p-1 shadow-sm">
               <TabsTrigger
@@ -1281,7 +1590,7 @@ export default function App() {
               >
                 To do
                 <span className="rounded px-1.5 py-0.5 text-[10px] font-mono bg-zinc-100 text-zinc-500">
-                  {calls.filter((c) => c.requiresAction).length}
+                  {todoItems.length}
                 </span>
               </TabsTrigger>
               <TabsTrigger
@@ -1289,17 +1598,6 @@ export default function App() {
                 className="rounded-xl data-[state=active]:bg-brand-gradient data-[state=active]:text-white data-[state=active]:shadow-sm"
               >
                 Insights
-              </TabsTrigger>
-              <TabsTrigger
-                value="deleted"
-                className="rounded-xl gap-2 data-[state=active]:bg-brand-gradient data-[state=active]:text-white data-[state=active]:shadow-sm"
-              >
-                Deleted
-                {deletedCalls.length > 0 ? (
-                  <span className="rounded px-1.5 py-0.5 text-[10px] font-mono bg-zinc-100 text-zinc-500">
-                    {deletedCalls.length}
-                  </span>
-                ) : null}
               </TabsTrigger>
             </TabsList>
 
@@ -1367,7 +1665,7 @@ export default function App() {
                               try {
                                 const offset = calls.length;
                                 const res = await fetch(
-                                  `${apiBaseUrl}/calls?limit=${PAGE_SIZE + 1}&offset=${offset}`
+                                  `${apiBaseUrl}/calls?limit=${PAGE_SIZE + 1}&offset=${offset}${propertyQuerySuffix}`
                                 );
                                 if (!res.ok) throw new Error(`Failed to load more calls: ${res.status}`);
                                 const data = (await res.json()) as ApiCall[];
@@ -1406,7 +1704,12 @@ export default function App() {
                     <>
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <div className="font-semibold">{selected.when}</div>
+                          <div className="flex items-baseline gap-2">
+                            <span className="font-semibold">{selected.when.date}</span>
+                            {selected.when.time ? (
+                              <span className="text-xs text-muted-foreground">{selected.when.time}</span>
+                            ) : null}
+                          </div>
                           {(selected.topLevelTags ?? []).map((t) => (
                             <Badge key={`detail-top-${t}`} className={topLevelTagClass[t]}>
                               {t}
@@ -1949,15 +2252,6 @@ export default function App() {
                         </div>
                       ) : null}
 
-                      <Separator />
-
-                      <div className="flex items-center gap-2">
-                        <Badge variant="outline" className="rounded-xl">
-                          {selected.detectedLanguage ? selected.detectedLanguage : selected.language}
-                        </Badge>
-                        <PriorityPill priority={selected.priority} />
-                      </div>
-
                       {!selected.requiresAction && (
                         <div className="text-xs text-muted-foreground">
                           This call is marked clean (no action).
@@ -1968,43 +2262,6 @@ export default function App() {
                 </CardContent>
               </Card>
             </div>
-          </TabsContent>
-
-          {/* Deleted */}
-          <TabsContent value="deleted" className="mt-4">
-            <Card className="rounded-2xl shadow-sm">
-              <CardHeader className="pb-2">
-                <CardTitle className="text-lg">Deleted calls ({deletedCalls.length})</CardTitle>
-                <CardDescription>Soft-deleted calls kept for review.</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                {deletedCalls.length === 0 ? (
-                  <div className="text-sm text-muted-foreground">No deleted calls.</div>
-                ) : (
-                  deletedCalls.map((call) => (
-                    <div
-                      key={`deleted-${call.id}`}
-                      className="rounded-2xl border border-zinc-200 bg-zinc-50/70 p-3 shadow-sm"
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="font-medium">{call.when}</div>
-                        <Badge variant="outline" className="rounded-xl">
-                          Deleted
-                        </Badge>
-                      </div>
-                      <div className="mt-1 text-sm text-muted-foreground">
-                        From: {call.from}
-                        {call.to ? ` • Receiver: ${call.to}` : ""}
-                      </div>
-                      <div className="mt-1 text-sm text-muted-foreground">
-                        Caller: {call.callerName?.trim() ? call.callerName : "Unknown"}
-                      </div>
-                      <div className="mt-2 text-sm leading-5">{getSummaryText(call.summary)}</div>
-                    </div>
-                  ))
-                )}
-              </CardContent>
-            </Card>
           </TabsContent>
 
           {/* To Do */}

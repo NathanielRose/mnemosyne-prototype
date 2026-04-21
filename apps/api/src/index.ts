@@ -2,7 +2,7 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import formbody from "@fastify/formbody";
 import rawBody from "fastify-raw-body";
-import { and, desc, eq, inArray, isNotNull, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, or } from "drizzle-orm";
 import { createBullBoard } from "@bull-board/api";
 import { BullMQAdapter } from "@bull-board/api/bullMQAdapter";
 import { ExpressAdapter } from "@bull-board/express";
@@ -14,6 +14,7 @@ import {
   callTagsSuggested,
   callTasksSuggested,
   calls,
+  properties,
   transcripts,
 } from "./schema.js";
 import { enqueueRecordingJob, getRecordingQueue } from "./queues/recordingQueue.js";
@@ -202,12 +203,155 @@ app.post(
   }
 );
 
+app.get("/notifications", async (request, reply) => {
+  try {
+    const { db } = getDb();
+
+    const candidates = await db
+      .select({
+        callId: calls.id,
+        externalId: calls.externalId,
+        startedAt: calls.startedAt,
+        fromNumber: calls.fromNumber,
+        callerName: calls.callerName,
+        summary: calls.summary,
+        requiresAction: calls.requiresAction,
+        propertyId: properties.id,
+        propertyName: properties.name,
+      })
+      .from(calls)
+      .leftJoin(properties, eq(properties.id, calls.propertyId))
+      .where(
+        and(
+          inArray(calls.status, [...CALL_TERMINAL_STATUSES])
+        )
+      )
+      .orderBy(desc(calls.startedAt))
+      .limit(100);
+
+    const callIds = candidates.map((c) => c.callId);
+    const confirmedTaskCallIds = new Set<string>();
+    const pendingSuggestionCallIds = new Set<string>();
+
+    if (callIds.length) {
+      const [confirmedRows, suggestedTaskRows, suggestedTagRows, suggestedParticipantRows] =
+        await Promise.all([
+          db
+            .select({ callId: callTasksSuggested.callId })
+            .from(callTasksSuggested)
+            .where(
+              and(
+                inArray(callTasksSuggested.callId, callIds),
+                eq(callTasksSuggested.state, "confirmed")
+              )
+            ),
+          db
+            .select({ callId: callTasksSuggested.callId })
+            .from(callTasksSuggested)
+            .where(
+              and(
+                inArray(callTasksSuggested.callId, callIds),
+                eq(callTasksSuggested.state, "suggested")
+              )
+            ),
+          db
+            .select({ callId: callTagsSuggested.callId })
+            .from(callTagsSuggested)
+            .where(
+              and(
+                inArray(callTagsSuggested.callId, callIds),
+                eq(callTagsSuggested.state, "suggested")
+              )
+            ),
+          db
+            .select({ callId: callParticipantsSuggested.callId })
+            .from(callParticipantsSuggested)
+            .where(
+              and(
+                inArray(callParticipantsSuggested.callId, callIds),
+                eq(callParticipantsSuggested.state, "suggested")
+              )
+            ),
+        ]);
+      for (const r of confirmedRows) confirmedTaskCallIds.add(r.callId);
+      for (const r of [...suggestedTaskRows, ...suggestedTagRows, ...suggestedParticipantRows]) {
+        pendingSuggestionCallIds.add(r.callId);
+      }
+    }
+
+    const items: Array<{
+      id: string;
+      kind: "task" | "suggestion";
+      callExternalId: string;
+      callerName: string | null;
+      fromNumber: string;
+      summary: string;
+      startedAt: string;
+      propertyId: string | null;
+      propertyName: string | null;
+    }> = [];
+
+    for (const c of candidates) {
+      const base = {
+        callExternalId: c.externalId,
+        callerName: c.callerName,
+        fromNumber: c.fromNumber,
+        summary: c.summary,
+        startedAt: c.startedAt.toISOString(),
+        propertyId: c.propertyId,
+        propertyName: c.propertyName,
+      };
+      const isTask = c.requiresAction || confirmedTaskCallIds.has(c.callId);
+      const isSuggestion = pendingSuggestionCallIds.has(c.callId);
+      if (isTask) items.push({ ...base, id: `task:${c.externalId}`, kind: "task" });
+      if (isSuggestion) items.push({ ...base, id: `suggestion:${c.externalId}`, kind: "suggestion" });
+    }
+
+    items.sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1));
+
+    reply.send({ items: items.slice(0, 50) });
+  } catch (err: any) {
+    request.log.error({ err }, "Database not configured for /notifications");
+    reply.code(503).send({ ok: false, error: "DATABASE_URL not configured" });
+  }
+});
+
+app.get("/properties", async (request, reply) => {
+  try {
+    const { db } = getDb();
+    const rows = await db
+      .select({
+        id: properties.id,
+        organizationId: properties.organizationId,
+        name: properties.name,
+        position: properties.position,
+        phoneNumber: properties.phoneNumber,
+        address: properties.address,
+        websiteUrl: properties.websiteUrl,
+        coverImageUrl: properties.coverImageUrl,
+      })
+      .from(properties)
+      .orderBy(asc(properties.position));
+
+    reply.send(rows);
+  } catch (err: any) {
+    request.log.error({ err }, "Database not configured for /properties");
+    reply.code(503).send({ ok: false, error: "DATABASE_URL not configured" });
+  }
+});
+
 app.get("/calls", async (request, reply) => {
-  const { limit, offset } = request.query as { limit?: string; offset?: string };
+  const { limit, offset, propertyId } = request.query as {
+    limit?: string;
+    offset?: string;
+    propertyId?: string;
+  };
   const parsedLimit = Number(limit);
   const safeLimit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 50) : 6;
   const parsedOffset = Number(offset);
   const safeOffset = Number.isFinite(parsedOffset) ? Math.max(parsedOffset, 0) : 0;
+  const safePropertyId =
+    typeof propertyId === "string" && propertyId.trim().length > 0 ? propertyId.trim() : null;
 
   try {
     const { db } = getDb();
@@ -222,7 +366,12 @@ app.get("/calls", async (request, reply) => {
       .where(
         and(
           inArray(calls.status, [...CALL_TERMINAL_STATUSES]),
-          or(isNotNull(transcripts.content), isNotNull(transcripts.contentEn))
+          or(
+            isNotNull(transcripts.content),
+            isNotNull(transcripts.contentEn),
+            eq(calls.requiresAction, true)
+          ),
+          safePropertyId ? eq(calls.propertyId, safePropertyId) : undefined
         )
       )
       .orderBy(desc(calls.startedAt))
@@ -253,6 +402,54 @@ app.get("/calls", async (request, reply) => {
       topTagsByCall.set(row.callId, list);
     }
 
+    const [pendingSuggestionRowSets, confirmedTaskRows] = callIds.length
+      ? await Promise.all([
+          Promise.all([
+            db
+              .select({ callId: callTasksSuggested.callId })
+              .from(callTasksSuggested)
+              .where(
+                and(
+                  inArray(callTasksSuggested.callId, callIds),
+                  eq(callTasksSuggested.state, "suggested")
+                )
+              ),
+            db
+              .select({ callId: callTagsSuggested.callId })
+              .from(callTagsSuggested)
+              .where(
+                and(
+                  inArray(callTagsSuggested.callId, callIds),
+                  eq(callTagsSuggested.state, "suggested")
+                )
+              ),
+            db
+              .select({ callId: callParticipantsSuggested.callId })
+              .from(callParticipantsSuggested)
+              .where(
+                and(
+                  inArray(callParticipantsSuggested.callId, callIds),
+                  eq(callParticipantsSuggested.state, "suggested")
+                )
+              ),
+          ]),
+          db
+            .select({ callId: callTasksSuggested.callId })
+            .from(callTasksSuggested)
+            .where(
+              and(
+                inArray(callTasksSuggested.callId, callIds),
+                eq(callTasksSuggested.state, "confirmed")
+              )
+            ),
+        ])
+      : [[[], [], []], []];
+
+    const pendingSuggestionCallIds = new Set(
+      pendingSuggestionRowSets.flat().map((r) => r.callId)
+    );
+    const confirmedTaskCallIds = new Set(confirmedTaskRows.map((r) => r.callId));
+
     const shaped = rows.map((r) => {
       const transcriptOriginal =
         typeof r.transcriptOriginal === "string" && r.transcriptOriginal.trim().length
@@ -278,6 +475,8 @@ app.get("/calls", async (request, reply) => {
         transcriptPreviewOriginal,
         transcriptPreviewEn,
         topLevelTags: topTagsByCall.get(r.call.id) ?? [],
+        hasPendingSuggestions: pendingSuggestionCallIds.has(r.call.id),
+        hasConfirmedTask: confirmedTaskCallIds.has(r.call.id),
       };
     });
 
@@ -289,11 +488,17 @@ app.get("/calls", async (request, reply) => {
 });
 
 app.get("/calls/deleted", async (request, reply) => {
-  const { limit, offset } = request.query as { limit?: string; offset?: string };
+  const { limit, offset, propertyId } = request.query as {
+    limit?: string;
+    offset?: string;
+    propertyId?: string;
+  };
   const parsedLimit = Number(limit);
   const safeLimit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 200) : 50;
   const parsedOffset = Number(offset);
   const safeOffset = Number.isFinite(parsedOffset) ? Math.max(parsedOffset, 0) : 0;
+  const safePropertyId =
+    typeof propertyId === "string" && propertyId.trim().length > 0 ? propertyId.trim() : null;
 
   try {
     const { db } = getDb();
@@ -305,7 +510,12 @@ app.get("/calls/deleted", async (request, reply) => {
       })
       .from(calls)
       .leftJoin(transcripts, eq(transcripts.callId, calls.id))
-      .where(eq(calls.status, DELETED_CALL_STATUS))
+      .where(
+        and(
+          eq(calls.status, DELETED_CALL_STATUS),
+          safePropertyId ? eq(calls.propertyId, safePropertyId) : undefined
+        )
+      )
       .orderBy(desc(calls.updatedAt), desc(calls.startedAt))
       .limit(safeLimit)
       .offset(safeOffset);
@@ -885,10 +1095,16 @@ app.patch("/calls/:externalId/caller", async (request, reply) => {
 });
 
 app.get("/tasks", async (request, reply) => {
-  const { state, limit } = request.query as { state?: string; limit?: string };
+  const { state, limit, propertyId } = request.query as {
+    state?: string;
+    limit?: string;
+    propertyId?: string;
+  };
   const safeState = state?.trim() || "confirmed";
   const parsedLimit = Number(limit);
   const safeLimit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 200) : 100;
+  const safePropertyId =
+    typeof propertyId === "string" && propertyId.trim().length > 0 ? propertyId.trim() : null;
   try {
     const { db } = getDb();
     const rows = await db
@@ -910,7 +1126,12 @@ app.get("/tasks", async (request, reply) => {
       })
       .from(callTasksSuggested)
       .innerJoin(calls, eq(callTasksSuggested.callId, calls.id))
-      .where(eq(callTasksSuggested.state, safeState))
+      .where(
+        and(
+          eq(callTasksSuggested.state, safeState),
+          safePropertyId ? eq(calls.propertyId, safePropertyId) : undefined
+        )
+      )
       .orderBy(desc(calls.startedAt))
       .limit(safeLimit);
 

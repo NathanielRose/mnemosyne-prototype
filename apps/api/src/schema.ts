@@ -22,11 +22,40 @@ export const callPriority = pgEnum("call_priority", ["Low", "Medium", "High"]);
 
 export const callLanguage = pgEnum("call_language", ["Greek", "English"]);
 
+export const organizations = pgTable("organizations", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  name: text("name").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const properties = pgTable(
+  "properties",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    organizationId: uuid("organization_id").notNull(),
+    name: text("name").notNull(),
+    position: integer("position").notNull(),
+    phoneNumber: text("phone_number").notNull(),
+    address: text("address"),
+    websiteUrl: text("website_url"),
+    coverImageUrl: text("cover_image_url"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    phoneNumberUnique: uniqueIndex("properties_phone_number_unique").on(table.phoneNumber),
+    orgPositionUnique: uniqueIndex("properties_org_position_unique").on(
+      table.organizationId,
+      table.position
+    ),
+  })
+);
+
 export const calls = pgTable(
   "calls",
   {
     id: uuid("id").defaultRandom().primaryKey(),
     externalId: text("external_id").notNull(),
+    propertyId: uuid("property_id"),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
     fromNumber: text("from_number").notNull(),
     callerName: text("caller_name"),

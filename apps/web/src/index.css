@@ -53,9 +53,12 @@
   }
 
   html {
-    /* Reserve the scrollbar gutter always so layout doesn't jump horizontally
-       when tab content changes height and the scrollbar appears/disappears. */
+    /* Always show a vertical scrollbar track so the page layout doesn't
+       shift when content height changes or Radix popovers briefly lock
+       scroll. `overflow-y: scroll` reserves the gutter reliably across
+       browsers even when `scrollbar-gutter: stable` is ignored. */
     scrollbar-gutter: stable;
+    overflow-y: scroll;
   }
 
   body {
@@ -64,6 +67,18 @@
       radial-gradient(ellipse 1200px 600px at 15% -200px, rgba(99, 102, 241, 0.09), transparent 60%),
       radial-gradient(ellipse 900px 500px at 95% -100px, rgba(139, 92, 246, 0.06), transparent 60%);
     background-attachment: fixed;
+  }
+
+  /* Neutralize `react-remove-scroll` (used by Radix Select/Dialog/Popover).
+     That library injects `body[data-scroll-locked] { margin-right: 15px
+     !important; }` to compensate for a scrollbar it assumes was on body.
+     Our scrollbar is on html (`overflow-y: scroll` above), so the margin
+     just shifts centered content. We match its specificity with
+     `html body[data-scroll-locked]` (0,1,2 > 0,1,1) so we win regardless
+     of cascade order. */
+  html body[data-scroll-locked] {
+    padding-right: 0 !important;
+    margin-right: 0 !important;
   }
 }
 

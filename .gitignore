@@ -26,6 +26,9 @@ Thumbs.db
 *.swo
 *~
 
+# Claude Code local state (worktrees, settings, commands, agents)
+.claude/
+
 # Logs
 logs/
 *.log
