@@ -14,11 +14,30 @@ import {
 // Minimal table definitions needed by the worker pipeline.
 // These map to the canonical DB schema in `/db/schema.ts` + migrations.
 
+export const properties = pgTable(
+  "properties",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    organizationId: uuid("organization_id").notNull(),
+    name: text("name").notNull(),
+    position: integer("position").notNull(),
+    phoneNumber: text("phone_number").notNull(),
+    address: text("address"),
+    websiteUrl: text("website_url"),
+    coverImageUrl: text("cover_image_url"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  (t) => ({
+    phoneNumberUnique: uniqueIndex("properties_phone_number_unique").on(t.phoneNumber),
+  })
+);
+
 export const calls = pgTable(
   "calls",
   {
     id: uuid("id").defaultRandom().primaryKey(),
     externalId: text("external_id").notNull(),
+    propertyId: uuid("property_id"),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
     fromNumber: text("from_number").notNull(),
     toNumber: text("to_number"),
@@ -149,10 +168,21 @@ export async function upsertCallAndRecording(payload: {
   const db = getDb();
   const now = payload.receivedAtIso ? new Date(payload.receivedAtIso) : new Date();
 
+  const propertyId = payload.toNumber
+    ? (
+        await db
+          .select({ id: properties.id })
+          .from(properties)
+          .where(eq(properties.phoneNumber, payload.toNumber))
+          .limit(1)
+      )[0]?.id ?? null
+    : null;
+
   const callRow = await db
     .insert(calls)
     .values({
       externalId: payload.callSid,
+      propertyId,
       startedAt: now,
       fromNumber: payload.fromNumber ?? "unknown",
       toNumber: payload.toNumber ?? null,
@@ -175,6 +205,7 @@ export async function upsertCallAndRecording(payload: {
         updatedAt: now,
         fromNumber: payload.fromNumber ?? "unknown",
         toNumber: payload.toNumber ?? null,
+        propertyId,
         durationSec: payload.durationSec ?? 0,
       },
     })
